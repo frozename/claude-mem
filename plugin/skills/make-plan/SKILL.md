@@ -55,6 +55,22 @@ The orchestrator consolidates findings into a single Phase 0 output.
 - Verify > Assume: Require proof, not assumptions about APIs
 - Session Boundaries: Each phase should be self-contained with its own doc references
 
+## Plan Registration (Cross-CLI Handoff)
+
+After saving the plan file, **always register it** so `do` can discover it from any CLI:
+
+1. Save the plan to `.claude/plans/{plan-name}.md` (create `.claude/plans/` if needed)
+2. Count the implementation phases (exclude Phase 0: Documentation Discovery)
+3. Register via MCP tool `register_plan` OR via HTTP:
+   ```
+   curl -s -X POST http://localhost:37777/api/plans \
+     -H 'Content-Type: application/json' \
+     -d '{"project":"<project-name>","name":"<plan-name>","filePath":"<absolute-path>","description":"<one-liner>","phaseCount":<N>,"platformSource":"<claude|gemini|codex>"}'
+   ```
+4. Confirm to the user: "Plan registered — you can run `do` in any CLI to execute it."
+
+The project name is the basename of the current working directory (e.g., `novaflow`).
+
 ## Anti-Patterns to Prevent
 
 - Inventing API methods that "should" exist

@@ -65,6 +65,7 @@ export class SessionStore {
     this.addSessionCustomTitleColumn();
     this.addSessionPlatformSourceColumn();
     this.addObservationModelColumns();
+    this.createPlansTable();
   }
 
   /**
@@ -2670,5 +2671,102 @@ export class SessionStore {
     );
 
     return { imported: true, id: result.lastInsertRowid as number };
+  }
+
+  // ─── Plans (cross-CLI plan handoff) ────────────────────────────────
+
+  /**
+   * Create plans table (migration 27)
+   * Stores plan metadata for cross-CLI discovery (make-plan → do handoff)
+   */
+  private createPlansTable(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(27) as SchemaVersion | undefined;
+    if (applied) {
+      const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").all() as TableNameRow[];
+      if (tables.length > 0) return;
+    }
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project TEXT NOT NULL,
+        name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_progress', 'completed', 'abandoned')),
+        description TEXT,
+        phase_count INTEGER,
+        current_phase INTEGER DEFAULT 0,
+        platform_source TEXT DEFAULT 'claude',
+        created_by_session TEXT,
+        created_at TEXT NOT NULL,
+        created_at_epoch INTEGER NOT NULL,
+        updated_at TEXT,
+        updated_at_epoch INTEGER
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project);
+      CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
+      CREATE INDEX IF NOT EXISTS idx_plans_created ON plans(created_at_epoch DESC);
+    `);
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
+  }
+
+  registerPlan(plan: {
+    project: string;
+    name: string;
+    filePath: string;
+    description?: string;
+    phaseCount?: number;
+    platformSource?: string;
+    createdBySession?: string;
+  }): { id: number; createdAtEpoch: number } {
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    const stmt = this.db.prepare(`
+      INSERT INTO plans (project, name, file_path, description, phase_count, platform_source, created_by_session, created_at, created_at_epoch)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      plan.project, plan.name, plan.filePath,
+      plan.description || null, plan.phaseCount || null,
+      plan.platformSource ? normalizePlatformSource(plan.platformSource) : DEFAULT_PLATFORM_SOURCE,
+      plan.createdBySession || null, nowIso, now
+    );
+
+    logger.info('DB', 'Plan registered', { id: Number(result.lastInsertRowid), project: plan.project, name: plan.name });
+    return { id: Number(result.lastInsertRowid), createdAtEpoch: now };
+  }
+
+  getPlans(project: string, status?: string, limit: number = 10): any[] {
+    if (status) {
+      return this.db.prepare(`
+        SELECT * FROM plans WHERE project = ? AND status = ? ORDER BY created_at_epoch DESC LIMIT ?
+      `).all(project, status, limit) as any[];
+    }
+    return this.db.prepare(`
+      SELECT * FROM plans WHERE project = ? ORDER BY created_at_epoch DESC LIMIT ?
+    `).all(project, limit) as any[];
+  }
+
+  getPlanById(id: number): any | null {
+    return (this.db.prepare('SELECT * FROM plans WHERE id = ?').get(id) as any) || null;
+  }
+
+  updatePlan(id: number, updates: { status?: string; currentPhase?: number }): boolean {
+    const plan = this.getPlanById(id);
+    if (!plan) return false;
+
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+
+    this.db.prepare(`
+      UPDATE plans SET status = ?, current_phase = ?, updated_at = ?, updated_at_epoch = ? WHERE id = ?
+    `).run(updates.status || plan.status, updates.currentPhase ?? plan.current_phase, nowIso, now, id);
+
+    logger.info('DB', 'Plan updated', { id, status: updates.status || plan.status });
+    return true;
   }
 }

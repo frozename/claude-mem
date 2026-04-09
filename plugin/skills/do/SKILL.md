@@ -7,6 +7,25 @@ description: Execute a phased implementation plan using subagents. Use when aske
 
 You are an ORCHESTRATOR. Deploy subagents to execute *all* work. Do not do the work yourself except to coordinate, route context, and verify that each subagent completed its assigned checklist.
 
+## Plan Discovery (ALWAYS FIRST)
+
+Before executing, find the plan. Follow this priority order:
+
+1. **If a plan is already in context** (e.g., the user pasted it or referenced a file) — use it directly
+2. **If the user named a plan** (e.g., `do add-user-auth`) — look for `.claude/plans/add-user-auth.md`
+3. **Otherwise, query the plan registry** for pending plans:
+   - Via MCP tool: `list_plans(project="<project-name>", status="pending")`
+   - Via HTTP fallback: `curl -s "http://localhost:37777/api/plans?project=<project-name>&status=pending"`
+   - The project name is the basename of the current working directory
+4. **If multiple pending plans exist** — show them to the user and ask which to execute
+5. **If no plans found** — tell the user: "No pending plans found. Run `make-plan` first to create one."
+
+Once a plan is selected:
+- Read the plan file from its `file_path`
+- Mark it as in-progress: `update_plan(id=<plan-id>, status="in_progress")`
+- After all phases complete successfully: `update_plan(id=<plan-id>, status="completed")`
+- If abandoned: `update_plan(id=<plan-id>, status="abandoned")`
+
 ## Execution Protocol
 
 ### Rules

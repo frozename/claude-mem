@@ -12,7 +12,7 @@ import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 import { logger } from '../../utils/logger.js';
 import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 import { USER_SETTINGS_PATH } from '../../shared/paths.js';
-import { normalizePlatformSource } from '../../shared/platform-source.js';
+
 
 export const contextHandler: EventHandler = {
   async execute(input: NormalizedHookInput): Promise<HookResult> {
@@ -32,15 +32,16 @@ export const contextHandler: EventHandler = {
     const cwd = input.cwd ?? process.cwd();
     const context = getProjectContext(cwd);
     const port = getWorkerPort();
-    const platformSource = normalizePlatformSource(input.platform);
 
     // Check if terminal output should be shown (load settings early)
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
     const showTerminalOutput = settings.CLAUDE_MEM_CONTEXT_SHOW_TERMINAL_OUTPUT === 'true';
 
     // Pass all projects (parent + worktree if applicable) for unified timeline
+    // Don't filter by platformSource — show observations from ALL platforms
+    // so memories are shared across Claude Code, Gemini CLI, Codex, etc.
     const projectsParam = context.allProjects.join(',');
-const apiPath = `/api/context/inject?projects=${encodeURIComponent(projectsParam)}&platformSource=${encodeURIComponent(platformSource)}`;
+    const apiPath = `/api/context/inject?projects=${encodeURIComponent(projectsParam)}`;
     const colorApiPath = input.platform === 'claude-code' ? `${apiPath}&colors=true` : apiPath;
 
     // Note: Removed AbortSignal.timeout due to Windows Bun cleanup issue (libuv assertion)

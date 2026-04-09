@@ -96,7 +96,8 @@ function errorIfWorkerScriptMissing(): void {
  */
 const TOOL_ENDPOINT_MAP: Record<string, string> = {
   'search': '/api/search',
-  'timeline': '/api/timeline'
+  'timeline': '/api/timeline',
+  'list_plans': '/api/plans'
 };
 
 /**
@@ -539,6 +540,76 @@ NEVER fetch full details without filtering first. 10x token savings.`,
       const { name, ...rest } = args;
       if (typeof name !== 'string' || name.trim() === '') throw new Error('Missing required argument: name');
       return await callWorkerAPIPost(`/api/corpus/${encodeURIComponent(name)}/reprime`, rest);
+    }
+  },
+  {
+    name: 'register_plan',
+    description: 'Register a plan for cross-CLI handoff. Call after make-plan saves a plan file. Enables `do` in any CLI to discover and execute the plan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name (typically the directory basename)' },
+        name: { type: 'string', description: 'Plan name (e.g. "add-user-auth")' },
+        filePath: { type: 'string', description: 'Absolute path to the plan markdown file' },
+        description: { type: 'string', description: 'One-line description of what the plan does' },
+        phaseCount: { type: 'number', description: 'Number of implementation phases in the plan' },
+        platformSource: { type: 'string', description: 'Which CLI created the plan (claude, gemini, codex, etc.)' }
+      },
+      required: ['project', 'name', 'filePath']
+    },
+    handler: async (args: any) => {
+      return await callWorkerAPIPost('/api/plans', args);
+    }
+  },
+  {
+    name: 'list_plans',
+    description: 'List plans for a project. Use to discover pending plans created by make-plan (possibly from another CLI). Params: project (required), status (pending|in_progress|completed|abandoned), limit',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project name (required)' },
+        status: { type: 'string', description: 'Filter by status: pending, in_progress, completed, abandoned' },
+        limit: { type: 'number', description: 'Max plans to return (default: 10)' }
+      },
+      required: ['project']
+    },
+    handler: async (args: any) => {
+      const endpoint = TOOL_ENDPOINT_MAP['list_plans'];
+      return await callWorkerAPI(endpoint, args);
+    }
+  },
+  {
+    name: 'update_plan',
+    description: 'Update a plan status or current phase. Call during `do` execution to track progress across phases.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'number', description: 'Plan ID (from list_plans or register_plan)' },
+        status: { type: 'string', description: 'New status: pending, in_progress, completed, abandoned' },
+        currentPhase: { type: 'number', description: 'Current phase number being executed' }
+      },
+      required: ['id']
+    },
+    handler: async (args: any) => {
+      const { id, ...body } = args;
+      try {
+        const response = await workerHttpRequest(`/api/plans/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Worker API error (${response.status}): ${errorText}`);
+        }
+        const data = await response.json();
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      } catch (error) {
+        return {
+          content: [{ type: 'text' as const, text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          isError: true
+        };
+      }
     }
   }
 ];
