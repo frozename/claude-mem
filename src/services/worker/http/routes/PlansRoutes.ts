@@ -10,6 +10,9 @@
  */
 
 import express, { Request, Response } from 'express';
+import { existsSync, readdirSync, readFileSync } from 'fs';
+import { join, basename } from 'path';
+import { homedir } from 'os';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { logger } from '../../../../utils/logger.js';
 import type { DatabaseManager } from '../../DatabaseManager.js';
@@ -49,10 +52,68 @@ export class PlansRoutes extends BaseRouteHandler {
 
     if (!project) { this.badRequest(res, 'project query parameter is required'); return; }
 
+    // Auto-register unregistered plan files from ~/.claude/plans/
+    this.autoRegisterPlans(project);
+
     const sessionStore = this.dbManager.getSessionStore();
     const plans = sessionStore.getPlans(project, status, limit);
     res.json({ plans, total: plans.length, project, filter: status || 'all' });
   });
+
+  /**
+   * Scan ~/.claude/plans/ for plan files not yet in the registry and register them.
+   * Extracts project context from plan file content (looks for project name mentions)
+   * or registers under the queried project if ambiguous.
+   */
+  private autoRegisterPlans(queryProject: string): void {
+    const plansDir = join(homedir(), '.claude', 'plans');
+    if (!existsSync(plansDir)) return;
+
+    const store = this.dbManager.getSessionStore();
+    const existingPlans = store.getPlans(queryProject, undefined, 1000);
+    const registeredPaths = new Set(existingPlans.map((p: any) => p.file_path));
+
+    let registered = 0;
+    try {
+      const files = readdirSync(plansDir).filter(f => f.endsWith('.md'));
+
+      for (const file of files) {
+        const filePath = join(plansDir, file);
+        if (registeredPaths.has(filePath)) continue;
+
+        const name = basename(file, '.md');
+        const content = readFileSync(filePath, 'utf-8').slice(0, 2000);
+
+        // Try to extract phase count from content
+        const phaseMatches = content.match(/## Phase \d+/gi);
+        const phaseCount = phaseMatches ? phaseMatches.length : undefined;
+
+        // Extract a description from the first heading or first line
+        const headingMatch = content.match(/^#\s+(.+)/m);
+        const description = headingMatch ? headingMatch[1].slice(0, 200) : undefined;
+
+        try {
+          store.registerPlan({
+            project: queryProject,
+            name,
+            filePath,
+            description,
+            phaseCount,
+            platformSource: 'auto-registered',
+          });
+          registered++;
+        } catch {
+          // Duplicate or constraint error — skip
+        }
+      }
+    } catch {
+      // Directory read error — skip silently
+    }
+
+    if (registered > 0) {
+      logger.info('HTTP', `Auto-registered ${registered} plan(s) from ${plansDir}`, { project: queryProject });
+    }
+  }
 
   private handleGetPlan = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
     const id = this.parseIntParam(req, res, 'id');
