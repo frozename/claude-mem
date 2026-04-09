@@ -1,0 +1,2 @@
+prompt = "I want to execute a pending implementation plan. Activate and follow the 'do' skill. Begin plan discovery immediately: check the plan registry via list_plans MCP tool (or HTTP fallback: curl -s 'http://localhost:37777/api/plans?project=<basename-of-cwd>&status=pending'), and also scan both .claude/plans/ and ~/.claude/plans/ for plan files. Show me the plan summary for confirmation before executing."
+description = "Execute a phased implementation plan created by make-plan"

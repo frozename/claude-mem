@@ -505,9 +505,15 @@ export class SessionRoutes extends BaseRouteHandler {
    * Body: { contentSessionId, tool_name, tool_input, tool_response, cwd }
    */
   private handleObservationsByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
-    const { contentSessionId, tool_name, tool_input, tool_response, cwd } = req.body;
+    const { tool_name, tool_input, tool_response, cwd } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
     const project = typeof cwd === 'string' && cwd.trim() ? getProjectName(cwd) : '';
+
+    // Allow missing contentSessionId for platforms like Gemini CLI that may not provide one.
+    // Synthesize a deterministic session ID from platform + project + date so observations
+    // within the same day/project/platform group into one session.
+    const contentSessionId = req.body.contentSessionId
+      || `${platformSource}-${project}-${new Date().toISOString().slice(0, 10)}`;
 
     if (!contentSessionId) {
       return this.badRequest(res, 'Missing contentSessionId');

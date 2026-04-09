@@ -5,24 +5,34 @@ description: Execute a phased implementation plan using subagents. Use when aske
 
 # Do Plan
 
+**BEGIN IMMEDIATELY.** When this skill activates, start Plan Discovery right away — do not wait for additional user input.
+
 You are an ORCHESTRATOR. Deploy subagents to execute *all* work. Do not do the work yourself except to coordinate, route context, and verify that each subagent completed its assigned checklist.
+
+**Platform notes:**
+- If subagents (Agent tool) are not available, execute the work directly yourself phase by phase.
+- For MCP tools: try the tool call first. If unavailable, use the HTTP fallback shown alongside each tool call.
 
 ## Plan Discovery (ALWAYS FIRST)
 
 Before executing, find the plan. Follow this priority order:
 
 1. **If a plan is already in context** (e.g., the user pasted it or referenced a file) — use it directly
-2. **If the user named a plan** (e.g., `do add-user-auth`) — look for `.claude/plans/add-user-auth.md`
+2. **If the user named a plan** (e.g., `do add-user-auth`) — look for `.claude/plans/add-user-auth.md` and `~/.claude/plans/add-user-auth.md`
 3. **Otherwise, query the plan registry** for pending plans:
    - Via MCP tool: `list_plans(project="<project-name>", status="pending")`
-   - Via HTTP fallback: `curl -s "http://localhost:37777/api/plans?project=<project-name>&status=pending"`
+   - Via HTTP (use if MCP tool is not available): `curl -s "http://localhost:37777/api/plans?project=<project-name>&status=pending"`
    - The project name is the basename of the current working directory
-4. **If multiple pending plans exist** — show them to the user and ask which to execute
-5. **If no plans found** — tell the user: "No pending plans found. Run `make-plan` first to create one."
+4. **If the registry returns nothing**, scan BOTH of these locations for plan files (glob `*.md`):
+   - `.claude/plans/` (project-level plans)
+   - `~/.claude/plans/` (user-level plans — Claude Code saves plans here by default)
+5. **If multiple pending plans exist** — show them to the user and ask which to execute
+6. **If no plans found anywhere** — tell the user: "No pending plans found. Run `make-plan` first to create one."
 
 Once a plan is selected:
 - Read the plan file from its `file_path`
-- Mark it as in-progress: `update_plan(id=<plan-id>, status="in_progress")`
+- **Show the plan summary to the user and ask for confirmation before executing.** Display the phase names, key tasks, and total phase count. Wait for the user to approve before proceeding.
+- Mark it as in-progress: `update_plan(id=<plan-id>, status="in_progress")` (HTTP fallback: `curl -s -X PATCH "http://localhost:37777/api/plans/<plan-id>" -H 'Content-Type: application/json' -d '{"status":"in_progress"}'`)
 - After all phases complete successfully: `update_plan(id=<plan-id>, status="completed")`
 - If abandoned: `update_plan(id=<plan-id>, status="abandoned")`
 

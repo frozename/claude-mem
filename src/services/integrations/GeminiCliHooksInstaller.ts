@@ -66,6 +66,10 @@ const GEMINI_SETTINGS_PATH = path.join(GEMINI_CONFIG_DIR, 'settings.json');
 const GEMINI_MD_PATH = path.join(GEMINI_CONFIG_DIR, 'GEMINI.md');
 
 const GEMINI_SKILLS_DIR = path.join(GEMINI_CONFIG_DIR, 'skills');
+const GEMINI_COMMANDS_DIR = path.join(GEMINI_CONFIG_DIR, 'commands', 'claude-mem');
+const GEMINI_EXTENSIONS_DIR = path.join(GEMINI_CONFIG_DIR, 'extensions');
+const GEMINI_EXTENSION_DIR = path.join(GEMINI_EXTENSIONS_DIR, 'claude-mem');
+const GEMINI_ENABLEMENT_PATH = path.join(GEMINI_EXTENSIONS_DIR, 'extension-enablement.json');
 const SKILL_PREFIX = 'claude-mem-';
 
 const HOOK_NAME = 'claude-mem';
@@ -267,16 +271,16 @@ ${contextEndTag}`;
 // ============================================================================
 
 /**
- * Find the plugin skills directory.
+ * Find the plugin directory root (contains skills/ and scripts/).
  * Searches marketplace install and development/source locations.
  */
-function findPluginSkillsDir(): string | null {
+function findPluginDir(): string | null {
   const candidates = [
-    path.join(MARKETPLACE_ROOT, 'plugin', 'skills'),
-    path.join(process.cwd(), 'plugin', 'skills'),
+    path.join(MARKETPLACE_ROOT, 'plugin'),
+    path.join(process.cwd(), 'plugin'),
   ];
   for (const dir of candidates) {
-    if (existsSync(dir)) {
+    if (existsSync(path.join(dir, 'skills')) && existsSync(path.join(dir, 'scripts'))) {
       return dir;
     }
   }
@@ -284,96 +288,216 @@ function findPluginSkillsDir(): string | null {
 }
 
 /**
- * Install claude-mem skills into ~/.gemini/skills/.
+ * Install claude-mem as a Gemini CLI extension.
  *
- * Creates symlinks from ~/.gemini/skills/claude-mem-{name}/ to the plugin
- * skills directory. Falls back to directory copies on Windows if symlinks fail.
+ * Creates ~/.gemini/extensions/claude-mem/ with:
+ * - gemini-extension.json (with mcpServers config)
+ * - skills/ symlinked to plugin skills
+ * - scripts/ symlinked to plugin scripts (for MCP server)
  *
- * @returns number of skills installed
+ * Also registers the extension in extension-enablement.json and
+ * cleans up any legacy individual skill symlinks from ~/.gemini/skills/.
  */
-function installGeminiSkills(): number {
-  const skillsSource = findPluginSkillsDir();
-  if (!skillsSource) {
-    console.log('  Could not find plugin skills directory — skipping skill registration.');
-    return 0;
+function installGeminiExtension(): { skills: number; mcpConfigured: boolean } {
+  const pluginDir = findPluginDir();
+  if (!pluginDir) {
+    console.log('  Could not find plugin directory — skipping extension registration.');
+    return { skills: 0, mcpConfigured: false };
   }
 
-  mkdirSync(GEMINI_SKILLS_DIR, { recursive: true });
+  // Create extension directory
+  mkdirSync(GEMINI_EXTENSION_DIR, { recursive: true });
 
-  const skillDirs = readdirSync(skillsSource, { withFileTypes: true })
-    .filter(d => d.isDirectory() && existsSync(path.join(skillsSource, d.name, 'SKILL.md')));
+  // Symlink skills/ and scripts/ into the extension
+  const links: Array<[string, string]> = [
+    [path.join(pluginDir, 'skills'), path.join(GEMINI_EXTENSION_DIR, 'skills')],
+    [path.join(pluginDir, 'scripts'), path.join(GEMINI_EXTENSION_DIR, 'scripts')],
+  ];
 
-  let installed = 0;
-  for (const dir of skillDirs) {
-    const targetName = `${SKILL_PREFIX}${dir.name}`;
-    const targetPath = path.join(GEMINI_SKILLS_DIR, targetName);
-    const sourcePath = path.join(skillsSource, dir.name);
-
-    // Remove existing symlink/directory if present
+  for (const [source, target] of links) {
     try {
-      const stat = lstatSync(targetPath);
-      if (stat.isSymbolicLink()) {
-        unlinkSync(targetPath);
-      } else {
-        // Not a symlink — skip, don't overwrite unknown directories
-        console.log(`  Skipping ${targetName}: target exists and is not a symlink`);
-        continue;
+      const stat = lstatSync(target);
+      if (stat.isSymbolicLink()) unlinkSync(target);
+    } catch {
+      // doesn't exist yet
+    }
+    try {
+      symlinkSync(source, target, 'dir');
+    } catch {
+      cpSync(source, target, { recursive: true });
+    }
+  }
+
+  // Count skills
+  const skillsDir = path.join(pluginDir, 'skills');
+  const skillCount = readdirSync(skillsDir, { withFileTypes: true })
+    .filter(d => d.isDirectory() && existsSync(path.join(skillsDir, d.name, 'SKILL.md')))
+    .length;
+
+  // Write gemini-extension.json with MCP server config
+  const extensionManifest = {
+    name: 'claude-mem',
+    version: getPluginVersion(pluginDir),
+    description: 'Persistent memory system — preserve context across Gemini CLI sessions',
+    mcpServers: {
+      'claude-mem': {
+        command: 'node',
+        args: ['${extensionPath}/scripts/mcp-server.cjs'],
+      },
+    },
+  };
+  writeFileSync(
+    path.join(GEMINI_EXTENSION_DIR, 'gemini-extension.json'),
+    JSON.stringify(extensionManifest, null, 2) + '\n',
+  );
+
+  // Register in extension-enablement.json
+  registerExtensionEnablement();
+
+  // Clean up legacy individual skill symlinks from ~/.gemini/skills/
+  cleanupLegacySkillSymlinks();
+
+  return { skills: skillCount, mcpConfigured: true };
+}
+
+/**
+ * Read the plugin version from plugin.json.
+ */
+function getPluginVersion(pluginDir: string): string {
+  try {
+    const pluginJson = JSON.parse(readFileSync(path.join(pluginDir, '.claude-plugin', 'plugin.json'), 'utf-8'));
+    return pluginJson.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * Register claude-mem in ~/.gemini/extensions/extension-enablement.json.
+ * Enables the extension for all user directories.
+ */
+function registerExtensionEnablement(): void {
+  let enablement: Record<string, unknown> = {};
+  if (existsSync(GEMINI_ENABLEMENT_PATH)) {
+    try {
+      enablement = JSON.parse(readFileSync(GEMINI_ENABLEMENT_PATH, 'utf-8'));
+    } catch {
+      // corrupt file — overwrite
+    }
+  }
+
+  enablement['claude-mem'] = { overrides: [`${homedir()}/*`] };
+  writeFileSync(GEMINI_ENABLEMENT_PATH, JSON.stringify(enablement, null, 2) + '\n');
+}
+
+/**
+ * Remove legacy individual skill symlinks from ~/.gemini/skills/claude-mem-*.
+ * These were created by an earlier installer version; the extension approach supersedes them.
+ */
+function cleanupLegacySkillSymlinks(): void {
+  if (!existsSync(GEMINI_SKILLS_DIR)) return;
+
+  const entries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.name.startsWith(SKILL_PREFIX)) continue;
+    const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
+    try {
+      if (lstatSync(entryPath).isSymbolicLink()) {
+        unlinkSync(entryPath);
       }
     } catch {
-      // lstatSync throws if path doesn't exist — that's fine, proceed to create
+      // ignore
     }
+  }
+}
 
+/**
+ * Find and install Gemini CLI commands (TOML files).
+ * Commands provide the prompt that triggers skill execution — without them,
+ * Gemini skill activation only loads context but doesn't generate a response.
+ *
+ * @returns number of commands installed
+ */
+function installGeminiCommands(): number {
+  const pluginDir = findPluginDir();
+  if (!pluginDir) return 0;
+
+  const commandsSource = path.join(pluginDir, 'gemini-commands');
+  if (!existsSync(commandsSource)) return 0;
+
+  mkdirSync(GEMINI_COMMANDS_DIR, { recursive: true });
+
+  const tomlFiles = readdirSync(commandsSource).filter(f => f.endsWith('.toml'));
+  let installed = 0;
+  for (const file of tomlFiles) {
     try {
-      symlinkSync(sourcePath, targetPath, 'dir');
+      cpSync(path.join(commandsSource, file), path.join(GEMINI_COMMANDS_DIR, file));
       installed++;
     } catch {
-      // Symlink failed (Windows without developer mode) — copy instead
-      try {
-        cpSync(sourcePath, targetPath, { recursive: true });
-        installed++;
-      } catch (copyErr) {
-        console.log(`  Failed to install skill ${dir.name}: ${(copyErr as Error).message}`);
-      }
+      // best effort
     }
   }
-
   return installed;
 }
 
 /**
- * Remove all claude-mem skill symlinks/copies from ~/.gemini/skills/.
- *
- * @returns number of skills removed
+ * Remove claude-mem Gemini commands directory.
  */
-function uninstallGeminiSkills(): number {
-  if (!existsSync(GEMINI_SKILLS_DIR)) {
-    return 0;
+function uninstallGeminiCommands(): void {
+  if (!existsSync(GEMINI_COMMANDS_DIR)) return;
+  try {
+    const files = readdirSync(GEMINI_COMMANDS_DIR);
+    for (const file of files) {
+      unlinkSync(path.join(GEMINI_COMMANDS_DIR, file));
+    }
+    require('fs').rmdirSync(GEMINI_COMMANDS_DIR);
+  } catch {
+    // best effort
   }
+}
 
-  const entries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true });
-  let removed = 0;
-
-  for (const entry of entries) {
-    if (!entry.name.startsWith(SKILL_PREFIX)) continue;
-
-    const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
-    try {
-      const stat = lstatSync(entryPath);
-      if (stat.isSymbolicLink()) {
-        unlinkSync(entryPath);
-        removed++;
-      } else if (stat.isDirectory()) {
-        // Copied directory — remove recursively
-        const { rmSync } = require('fs');
-        rmSync(entryPath, { recursive: true, force: true });
-        removed++;
+/**
+ * Uninstall the claude-mem Gemini extension.
+ * Removes the extension directory and its entry in extension-enablement.json.
+ * Also cleans up any legacy skill symlinks.
+ */
+function uninstallGeminiExtension(): void {
+  // Remove extension directory
+  if (existsSync(GEMINI_EXTENSION_DIR)) {
+    // Unlink symlinks first, then remove the directory
+    for (const name of ['skills', 'scripts']) {
+      const linkPath = path.join(GEMINI_EXTENSION_DIR, name);
+      try {
+        if (lstatSync(linkPath).isSymbolicLink()) unlinkSync(linkPath);
+      } catch {
+        // not a symlink or doesn't exist
       }
-    } catch (err) {
-      console.log(`  Failed to remove ${entry.name}: ${(err as Error).message}`);
+    }
+    // Remove remaining files (gemini-extension.json)
+    try {
+      const remaining = readdirSync(GEMINI_EXTENSION_DIR);
+      for (const file of remaining) {
+        unlinkSync(path.join(GEMINI_EXTENSION_DIR, file));
+      }
+      require('fs').rmdirSync(GEMINI_EXTENSION_DIR);
+    } catch {
+      // best effort
     }
   }
 
-  return removed;
+  // Remove from extension-enablement.json
+  if (existsSync(GEMINI_ENABLEMENT_PATH)) {
+    try {
+      const enablement = JSON.parse(readFileSync(GEMINI_ENABLEMENT_PATH, 'utf-8'));
+      delete enablement['claude-mem'];
+      writeFileSync(GEMINI_ENABLEMENT_PATH, JSON.stringify(enablement, null, 2) + '\n');
+    } catch {
+      // ignore
+    }
+  }
+
+  // Clean up legacy skill symlinks
+  cleanupLegacySkillSymlinks();
 }
 
 // ============================================================================
@@ -423,10 +547,19 @@ export async function installGeminiCliHooks(): Promise<number> {
     setupGeminiMdContextSection();
     console.log(`  Setup context injection in ${GEMINI_MD_PATH}`);
 
-    // Install skills into ~/.gemini/skills/
-    const skillCount = installGeminiSkills();
-    if (skillCount > 0) {
-      console.log(`  Registered ${skillCount} skills in ${GEMINI_SKILLS_DIR}`);
+    // Install as Gemini extension (skills + MCP server)
+    const ext = installGeminiExtension();
+    if (ext.skills > 0) {
+      console.log(`  Registered ${ext.skills} skills via extension`);
+    }
+    if (ext.mcpConfigured) {
+      console.log(`  MCP server configured in extension`);
+    }
+
+    // Install Gemini commands (TOML files that trigger skill execution)
+    const cmdCount = installGeminiCommands();
+    if (cmdCount > 0) {
+      console.log(`  Installed ${cmdCount} commands (use /claude-mem:<name> in Gemini CLI)`);
     }
 
     // List installed events
@@ -441,7 +574,7 @@ export async function installGeminiCliHooks(): Promise<number> {
 Installation complete!
 
 Hooks installed to: ${GEMINI_SETTINGS_PATH}
-Skills installed to: ${GEMINI_SKILLS_DIR}
+Extension installed to: ${GEMINI_EXTENSION_DIR}
 Using unified CLI: bun worker-service.cjs hook gemini-cli <event>
 
 Next steps:
@@ -521,11 +654,11 @@ export function uninstallGeminiCliHooks(): number {
       }
     }
 
-    // Remove claude-mem skills from ~/.gemini/skills/
-    const skillsRemoved = uninstallGeminiSkills();
-    if (skillsRemoved > 0) {
-      console.log(`  Removed ${skillsRemoved} skill(s) from ${GEMINI_SKILLS_DIR}`);
-    }
+    // Remove claude-mem Gemini extension and commands
+    uninstallGeminiExtension();
+    console.log(`  Removed extension from ${GEMINI_EXTENSION_DIR}`);
+    uninstallGeminiCommands();
+    console.log(`  Removed commands from ${GEMINI_COMMANDS_DIR}`);
 
     console.log('\nUninstallation complete!\n');
     console.log('Restart Gemini CLI to apply changes.');
@@ -602,23 +735,26 @@ export function checkGeminiCliHooksStatus(): number {
     console.log('Context: No GEMINI.md found');
   }
 
-  // Check installed skills
-  if (existsSync(GEMINI_SKILLS_DIR)) {
-    const skillEntries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true })
-      .filter(e => e.name.startsWith(SKILL_PREFIX));
-    if (skillEntries.length > 0) {
-      console.log(`Skills: ${skillEntries.length} installed in ${GEMINI_SKILLS_DIR}`);
-      for (const entry of skillEntries) {
-        const skillName = entry.name.replace(SKILL_PREFIX, '');
-        const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
-        const isLink = lstatSync(entryPath).isSymbolicLink();
-        console.log(`  ${skillName}${isLink ? ' (symlink)' : ''}`);
+  // Check extension installation
+  const extManifestPath = path.join(GEMINI_EXTENSION_DIR, 'gemini-extension.json');
+  if (existsSync(extManifestPath)) {
+    console.log(`Extension: Installed at ${GEMINI_EXTENSION_DIR}`);
+    try {
+      const manifest = JSON.parse(readFileSync(extManifestPath, 'utf-8'));
+      if (manifest.mcpServers) {
+        console.log(`  MCP servers: ${Object.keys(manifest.mcpServers).join(', ')}`);
       }
-    } else {
-      console.log('Skills: None installed');
+    } catch {
+      // ignore parse errors
+    }
+    const extSkillsDir = path.join(GEMINI_EXTENSION_DIR, 'skills');
+    if (existsSync(extSkillsDir)) {
+      const skills = readdirSync(extSkillsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory() && existsSync(path.join(extSkillsDir, d.name, 'SKILL.md')));
+      console.log(`  Skills: ${skills.length} (${skills.map(s => s.name).join(', ')})`);
     }
   } else {
-    console.log('Skills: None installed');
+    console.log('Extension: Not installed');
   }
 
   console.log('');
