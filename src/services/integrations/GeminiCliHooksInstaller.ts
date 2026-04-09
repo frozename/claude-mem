@@ -24,9 +24,9 @@
 
 import path from 'path';
 import { homedir } from 'os';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { logger } from '../../utils/logger.js';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, symlinkSync, lstatSync, unlinkSync, cpSync } from 'fs';
 import { findWorkerServicePath, findBunPath } from './CursorHooksInstaller.js';
+import { MARKETPLACE_ROOT } from '../../shared/paths.js';
 
 // ============================================================================
 // Types
@@ -64,6 +64,9 @@ interface GeminiSettingsJson {
 const GEMINI_CONFIG_DIR = path.join(homedir(), '.gemini');
 const GEMINI_SETTINGS_PATH = path.join(GEMINI_CONFIG_DIR, 'settings.json');
 const GEMINI_MD_PATH = path.join(GEMINI_CONFIG_DIR, 'GEMINI.md');
+
+const GEMINI_SKILLS_DIR = path.join(GEMINI_CONFIG_DIR, 'skills');
+const SKILL_PREFIX = 'claude-mem-';
 
 const HOOK_NAME = 'claude-mem';
 const HOOK_TIMEOUT_MS = 10000;
@@ -260,6 +263,120 @@ ${contextEndTag}`;
 }
 
 // ============================================================================
+// Skill Registration
+// ============================================================================
+
+/**
+ * Find the plugin skills directory.
+ * Searches marketplace install and development/source locations.
+ */
+function findPluginSkillsDir(): string | null {
+  const candidates = [
+    path.join(MARKETPLACE_ROOT, 'plugin', 'skills'),
+    path.join(process.cwd(), 'plugin', 'skills'),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(dir)) {
+      return dir;
+    }
+  }
+  return null;
+}
+
+/**
+ * Install claude-mem skills into ~/.gemini/skills/.
+ *
+ * Creates symlinks from ~/.gemini/skills/claude-mem-{name}/ to the plugin
+ * skills directory. Falls back to directory copies on Windows if symlinks fail.
+ *
+ * @returns number of skills installed
+ */
+function installGeminiSkills(): number {
+  const skillsSource = findPluginSkillsDir();
+  if (!skillsSource) {
+    console.log('  Could not find plugin skills directory — skipping skill registration.');
+    return 0;
+  }
+
+  mkdirSync(GEMINI_SKILLS_DIR, { recursive: true });
+
+  const skillDirs = readdirSync(skillsSource, { withFileTypes: true })
+    .filter(d => d.isDirectory() && existsSync(path.join(skillsSource, d.name, 'SKILL.md')));
+
+  let installed = 0;
+  for (const dir of skillDirs) {
+    const targetName = `${SKILL_PREFIX}${dir.name}`;
+    const targetPath = path.join(GEMINI_SKILLS_DIR, targetName);
+    const sourcePath = path.join(skillsSource, dir.name);
+
+    // Remove existing symlink/directory if present
+    try {
+      const stat = lstatSync(targetPath);
+      if (stat.isSymbolicLink()) {
+        unlinkSync(targetPath);
+      } else {
+        // Not a symlink — skip, don't overwrite unknown directories
+        console.log(`  Skipping ${targetName}: target exists and is not a symlink`);
+        continue;
+      }
+    } catch {
+      // lstatSync throws if path doesn't exist — that's fine, proceed to create
+    }
+
+    try {
+      symlinkSync(sourcePath, targetPath, 'dir');
+      installed++;
+    } catch {
+      // Symlink failed (Windows without developer mode) — copy instead
+      try {
+        cpSync(sourcePath, targetPath, { recursive: true });
+        installed++;
+      } catch (copyErr) {
+        console.log(`  Failed to install skill ${dir.name}: ${(copyErr as Error).message}`);
+      }
+    }
+  }
+
+  return installed;
+}
+
+/**
+ * Remove all claude-mem skill symlinks/copies from ~/.gemini/skills/.
+ *
+ * @returns number of skills removed
+ */
+function uninstallGeminiSkills(): number {
+  if (!existsSync(GEMINI_SKILLS_DIR)) {
+    return 0;
+  }
+
+  const entries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true });
+  let removed = 0;
+
+  for (const entry of entries) {
+    if (!entry.name.startsWith(SKILL_PREFIX)) continue;
+
+    const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
+    try {
+      const stat = lstatSync(entryPath);
+      if (stat.isSymbolicLink()) {
+        unlinkSync(entryPath);
+        removed++;
+      } else if (stat.isDirectory()) {
+        // Copied directory — remove recursively
+        const { rmSync } = require('fs');
+        rmSync(entryPath, { recursive: true, force: true });
+        removed++;
+      }
+    } catch (err) {
+      console.log(`  Failed to remove ${entry.name}: ${(err as Error).message}`);
+    }
+  }
+
+  return removed;
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -306,6 +423,12 @@ export async function installGeminiCliHooks(): Promise<number> {
     setupGeminiMdContextSection();
     console.log(`  Setup context injection in ${GEMINI_MD_PATH}`);
 
+    // Install skills into ~/.gemini/skills/
+    const skillCount = installGeminiSkills();
+    if (skillCount > 0) {
+      console.log(`  Registered ${skillCount} skills in ${GEMINI_SKILLS_DIR}`);
+    }
+
     // List installed events
     const eventNames = Object.keys(GEMINI_EVENT_TO_INTERNAL_EVENT);
     console.log(`  Registered ${eventNames.length} hook events:`);
@@ -318,6 +441,7 @@ export async function installGeminiCliHooks(): Promise<number> {
 Installation complete!
 
 Hooks installed to: ${GEMINI_SETTINGS_PATH}
+Skills installed to: ${GEMINI_SKILLS_DIR}
 Using unified CLI: bun worker-service.cjs hook gemini-cli <event>
 
 Next steps:
@@ -397,6 +521,12 @@ export function uninstallGeminiCliHooks(): number {
       }
     }
 
+    // Remove claude-mem skills from ~/.gemini/skills/
+    const skillsRemoved = uninstallGeminiSkills();
+    if (skillsRemoved > 0) {
+      console.log(`  Removed ${skillsRemoved} skill(s) from ${GEMINI_SKILLS_DIR}`);
+    }
+
     console.log('\nUninstallation complete!\n');
     console.log('Restart Gemini CLI to apply changes.');
     return 0;
@@ -470,6 +600,25 @@ export function checkGeminiCliHooksStatus(): number {
     }
   } else {
     console.log('Context: No GEMINI.md found');
+  }
+
+  // Check installed skills
+  if (existsSync(GEMINI_SKILLS_DIR)) {
+    const skillEntries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true })
+      .filter(e => e.name.startsWith(SKILL_PREFIX));
+    if (skillEntries.length > 0) {
+      console.log(`Skills: ${skillEntries.length} installed in ${GEMINI_SKILLS_DIR}`);
+      for (const entry of skillEntries) {
+        const skillName = entry.name.replace(SKILL_PREFIX, '');
+        const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
+        const isLink = lstatSync(entryPath).isSymbolicLink();
+        console.log(`  ${skillName}${isLink ? ' (symlink)' : ''}`);
+      }
+    } else {
+      console.log('Skills: None installed');
+    }
+  } else {
+    console.log('Skills: None installed');
   }
 
   console.log('');

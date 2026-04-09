@@ -10,6 +10,7 @@ const rootDir = path.resolve(__dirname, '..');
 const packageJsonPath = path.join(rootDir, 'package.json');
 const codexPluginPath = path.join(rootDir, '.codex-plugin', 'plugin.json');
 const claudePluginPath = path.join(rootDir, '.claude-plugin', 'plugin.json');
+const geminiExtensionPath = path.join(rootDir, 'plugin', '.gemini-plugin', 'gemini-extension.json');
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -41,6 +42,14 @@ function syncCodexPlugin(plugin, pkg) {
       developerName: normalizeAuthorName(pkg.author),
       websiteURL: normalizeRepositoryUrl(pkg.repository),
     },
+  };
+}
+
+function syncGeminiExtension(extension, pkg) {
+  return {
+    ...extension,
+    name: pkg.name,
+    version: pkg.version,
   };
 }
 
@@ -88,6 +97,12 @@ function main() {
 
   writeJson(codexPluginPath, syncCodexPlugin(codexPlugin, pkg));
   writeJson(claudePluginPath, syncClaudePlugin(claudePlugin, pkg));
+
+  // Sync Gemini extension manifest (optional — only if the file exists)
+  if (fs.existsSync(geminiExtensionPath)) {
+    const geminiExtension = readJson(geminiExtensionPath);
+    writeJson(geminiExtensionPath, syncGeminiExtension(geminiExtension, pkg));
+  }
 
   console.log('✓ Synced plugin manifests from package.json');
 }
