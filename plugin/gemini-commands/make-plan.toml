@@ -1,0 +1,2 @@
+prompt = "I want to create a detailed implementation plan. Activate and follow the 'make-plan' skill. Start by asking me what I want to plan, then perform documentation discovery before writing the phased plan. Save the plan to .claude/plans/ and register it via register_plan MCP tool (or HTTP fallback: curl -s -X POST http://localhost:37777/api/plans)."
+description = "Create a phased implementation plan with documentation discovery"

@@ -51,6 +51,8 @@
     "plugin/scripts/*.cjs",
     "plugin/scripts/CLAUDE.md",
     "plugin/skills",
+    "plugin/gemini-commands",
+    "plugin/.gemini-plugin",
     "plugin/ui",
     "openclaw"
   ],

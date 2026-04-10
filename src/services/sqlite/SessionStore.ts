@@ -2681,9 +2681,17 @@ export class SessionStore {
    */
   private createPlansTable(): void {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(27) as SchemaVersion | undefined;
-    if (applied) {
-      const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").all() as TableNameRow[];
-      if (tables.length > 0) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").all() as TableNameRow[];
+
+    if (applied && tables.length > 0) {
+      // Ensure unique index exists (added after initial migration)
+      const indexes = this.db.query('PRAGMA index_list(plans)').all() as { name: string }[];
+      const hasUniqueIndex = indexes.some(idx => idx.name === 'idx_plans_file_path_unique');
+      if (!hasUniqueIndex) {
+        this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path)');
+        logger.debug('DB', 'Added unique index on plans(file_path)');
+      }
+      return;
     }
 
     this.db.run(`
@@ -2707,6 +2715,7 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project);
       CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
       CREATE INDEX IF NOT EXISTS idx_plans_created ON plans(created_at_epoch DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path);
     `);
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
@@ -2725,7 +2734,7 @@ export class SessionStore {
     const nowIso = new Date(now).toISOString();
 
     const stmt = this.db.prepare(`
-      INSERT INTO plans (project, name, file_path, description, phase_count, platform_source, created_by_session, created_at, created_at_epoch)
+      INSERT OR IGNORE INTO plans (project, name, file_path, description, phase_count, platform_source, created_by_session, created_at, created_at_epoch)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
@@ -2735,6 +2744,12 @@ export class SessionStore {
       plan.platformSource ? normalizePlatformSource(plan.platformSource) : DEFAULT_PLATFORM_SOURCE,
       plan.createdBySession || null, nowIso, now
     );
+
+    if (result.changes === 0) {
+      // Duplicate file_path, fetch the existing plan
+      const existing = this.db.prepare('SELECT id, created_at_epoch FROM plans WHERE file_path = ?').get(plan.filePath) as { id: number; created_at_epoch: number };
+      return { id: Number(existing.id), createdAtEpoch: existing.created_at_epoch };
+    }
 
     logger.info('DB', 'Plan registered', { id: Number(result.lastInsertRowid), project: plan.project, name: plan.name });
     return { id: Number(result.lastInsertRowid), createdAtEpoch: now };
@@ -2749,6 +2764,11 @@ export class SessionStore {
     return this.db.prepare(`
       SELECT * FROM plans WHERE project = ? ORDER BY created_at_epoch DESC LIMIT ?
     `).all(project, limit) as any[];
+  }
+
+  getAllRegisteredPlanPaths(): Set<string> {
+    const rows = this.db.prepare('SELECT DISTINCT file_path FROM plans').all() as { file_path: string }[];
+    return new Set(rows.map(r => r.file_path));
   }
 
   getPlanById(id: number): any | null {

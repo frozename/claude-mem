@@ -1,0 +1,2 @@
+prompt = "Search my persistent memory for relevant past work. Activate and follow the 'mem-search' skill. Use the search MCP tool (or HTTP fallback: curl -s 'http://localhost:37777/api/search?q=<query>') to find observations from previous sessions. Ask me what I want to search for if I haven't specified."
+description = "Search past work from previous sessions"

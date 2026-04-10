@@ -6,6 +6,7 @@
  */
 
 import express, { Request, Response } from 'express';
+import { createHash } from 'crypto';
 import { getWorkerPort } from '../../../../shared/worker-utils.js';
 import { logger } from '../../../../utils/logger.js';
 import { stripMemoryTagsFromJson, stripMemoryTagsFromPrompt } from '../../../../utils/tag-stripping.js';
@@ -24,6 +25,8 @@ import { USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getProcessBySession, ensureProcessExit } from '../../ProcessRegistry.js';
 import { getProjectName } from '../../../../utils/project-name.js';
 import { normalizePlatformSource } from '../../../../shared/platform-source.js';
+
+const PLATFORMS_ALLOWING_SYNTHETIC_SESSION = new Set(['gemini', 'cli']);
 
 export class SessionRoutes extends BaseRouteHandler {
   private completionHandler: SessionCompletionHandler;
@@ -505,12 +508,22 @@ export class SessionRoutes extends BaseRouteHandler {
    * Body: { contentSessionId, tool_name, tool_input, tool_response, cwd }
    */
   private handleObservationsByClaudeId = this.wrapHandler((req: Request, res: Response): void => {
-    const { contentSessionId, tool_name, tool_input, tool_response, cwd } = req.body;
+    const { tool_name, tool_input, tool_response, cwd } = req.body;
     const platformSource = normalizePlatformSource(req.body.platformSource);
     const project = typeof cwd === 'string' && cwd.trim() ? getProjectName(cwd) : '';
 
+    // Require contentSessionId from platforms that should always provide it.
+    // Only synthesize for explicitly allowed platforms (e.g. Gemini CLI).
+    let contentSessionId = req.body.contentSessionId;
     if (!contentSessionId) {
-      return this.badRequest(res, 'Missing contentSessionId');
+      if (!PLATFORMS_ALLOWING_SYNTHETIC_SESSION.has(platformSource)) {
+        return this.badRequest(res, 'Missing contentSessionId');
+      }
+      // Deterministic: groups all observations from the same platform/project/directory
+      // on the same day into one session. Intentional for Gemini CLI which may make
+      // multiple stateless invocations within a single logical session.
+      const cwdHash = createHash('sha256').update(cwd || '').digest('hex').slice(0, 8);
+      contentSessionId = `${platformSource}-${project}-${cwdHash}-${new Date().toISOString().slice(0, 10)}`;
     }
 
     // Load skip tools from settings
@@ -545,18 +558,24 @@ export class SessionRoutes extends BaseRouteHandler {
       const sessionDbId = store.createSDKSession(contentSessionId, project, '', undefined, platformSource);
       const promptNumber = store.getPromptNumberFromUserPrompts(contentSessionId);
 
-      // Privacy check: skip if user prompt was entirely private
-      const userPrompt = PrivacyCheckValidator.checkUserPromptPrivacy(
-        store,
-        contentSessionId,
-        promptNumber,
-        'observation',
-        sessionDbId,
-        { tool_name }
-      );
-      if (!userPrompt) {
-        res.json({ status: 'skipped', reason: 'private' });
-        return;
+      const isSynthesizedSession = PLATFORMS_ALLOWING_SYNTHETIC_SESSION.has(platformSource) && !req.body.contentSessionId;
+
+      if (!isSynthesizedSession) {
+        // Privacy check: skip if user prompt was entirely private
+        // Synthesized sessions (Gemini/CLI) bypass the privacy check since they don't
+        // go through the init flow that saves user prompts for privacy filtering.
+        const userPrompt = PrivacyCheckValidator.checkUserPromptPrivacy(
+          store,
+          contentSessionId,
+          promptNumber,
+          'observation',
+          sessionDbId,
+          { tool_name }
+        );
+        if (!userPrompt) {
+          res.json({ status: 'skipped', reason: 'private' });
+          return;
+        }
       }
 
       // Strip memory tags from tool_input and tool_response

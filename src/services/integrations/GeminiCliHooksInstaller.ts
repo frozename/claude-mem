@@ -24,9 +24,9 @@
 
 import path from 'path';
 import { homedir } from 'os';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { logger } from '../../utils/logger.js';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, symlinkSync, lstatSync, unlinkSync, cpSync, rmSync } from 'fs';
 import { findWorkerServicePath, findBunPath } from './CursorHooksInstaller.js';
+import { MARKETPLACE_ROOT } from '../../shared/paths.js';
 
 // ============================================================================
 // Types
@@ -64,6 +64,13 @@ interface GeminiSettingsJson {
 const GEMINI_CONFIG_DIR = path.join(homedir(), '.gemini');
 const GEMINI_SETTINGS_PATH = path.join(GEMINI_CONFIG_DIR, 'settings.json');
 const GEMINI_MD_PATH = path.join(GEMINI_CONFIG_DIR, 'GEMINI.md');
+
+const GEMINI_SKILLS_DIR = path.join(GEMINI_CONFIG_DIR, 'skills');
+const GEMINI_COMMANDS_DIR = path.join(GEMINI_CONFIG_DIR, 'commands', 'claude-mem');
+const GEMINI_EXTENSIONS_DIR = path.join(GEMINI_CONFIG_DIR, 'extensions');
+const GEMINI_EXTENSION_DIR = path.join(GEMINI_EXTENSIONS_DIR, 'claude-mem');
+const GEMINI_ENABLEMENT_PATH = path.join(GEMINI_EXTENSIONS_DIR, 'extension-enablement.json');
+const SKILL_PREFIX = 'claude-mem-';
 
 const HOOK_NAME = 'claude-mem';
 const HOOK_TIMEOUT_MS = 10000;
@@ -260,6 +267,219 @@ ${contextEndTag}`;
 }
 
 // ============================================================================
+// Skill Registration
+// ============================================================================
+
+/**
+ * Find the plugin directory root (contains skills/ and scripts/).
+ * Searches marketplace install and development/source locations.
+ */
+function findPluginDir(): string | null {
+  const candidates = [
+    path.join(MARKETPLACE_ROOT, 'plugin'),
+    path.join(process.cwd(), 'plugin'),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(path.join(dir, 'skills')) && existsSync(path.join(dir, 'scripts'))) {
+      return dir;
+    }
+  }
+  return null;
+}
+
+/**
+ * Install claude-mem as a Gemini CLI extension.
+ *
+ * Creates ~/.gemini/extensions/claude-mem/ with:
+ * - gemini-extension.json (with mcpServers config)
+ * - skills/ symlinked to plugin skills
+ * - scripts/ symlinked to plugin scripts (for MCP server)
+ *
+ * Also registers the extension in extension-enablement.json and
+ * cleans up any legacy individual skill symlinks from ~/.gemini/skills/.
+ */
+function installGeminiExtension(): { skills: number; mcpConfigured: boolean } {
+  const pluginDir = findPluginDir();
+  if (!pluginDir) {
+    console.log('  Could not find plugin directory — skipping extension registration.');
+    return { skills: 0, mcpConfigured: false };
+  }
+
+  // Create extension directory
+  mkdirSync(GEMINI_EXTENSION_DIR, { recursive: true });
+
+  // Symlink skills/ and scripts/ into the extension
+  const links: Array<[string, string]> = [
+    [path.join(pluginDir, 'skills'), path.join(GEMINI_EXTENSION_DIR, 'skills')],
+    [path.join(pluginDir, 'scripts'), path.join(GEMINI_EXTENSION_DIR, 'scripts')],
+  ];
+
+  for (const [source, target] of links) {
+    rmSync(target, { recursive: true, force: true });
+    try {
+      symlinkSync(source, target, 'dir');
+    } catch {
+      cpSync(source, target, { recursive: true });
+    }
+  }
+
+  // Count skills
+  const skillsDir = path.join(pluginDir, 'skills');
+  const skillCount = readdirSync(skillsDir, { withFileTypes: true })
+    .filter(d => d.isDirectory() && existsSync(path.join(skillsDir, d.name, 'SKILL.md')))
+    .length;
+
+  // Write gemini-extension.json with MCP server config
+  const extensionManifest = {
+    name: 'claude-mem',
+    version: getPluginVersion(pluginDir),
+    description: 'Persistent memory system — preserve context across Gemini CLI sessions',
+    mcpServers: {
+      'claude-mem': {
+        command: 'node',
+        args: ['${extensionPath}/scripts/mcp-server.cjs'],
+      },
+    },
+  };
+  writeFileSync(
+    path.join(GEMINI_EXTENSION_DIR, 'gemini-extension.json'),
+    JSON.stringify(extensionManifest, null, 2) + '\n',
+  );
+
+  // Register in extension-enablement.json
+  registerExtensionEnablement();
+
+  // Clean up legacy individual skill symlinks from ~/.gemini/skills/
+  cleanupLegacySkillSymlinks();
+
+  return { skills: skillCount, mcpConfigured: true };
+}
+
+/**
+ * Read the plugin version from plugin.json.
+ */
+function getPluginVersion(pluginDir: string): string {
+  try {
+    const pluginJson = JSON.parse(readFileSync(path.join(pluginDir, '.claude-plugin', 'plugin.json'), 'utf-8'));
+    return pluginJson.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * Register claude-mem in ~/.gemini/extensions/extension-enablement.json.
+ * Enables the extension for all user directories.
+ */
+function registerExtensionEnablement(): void {
+  let enablement: Record<string, unknown> = {};
+  if (existsSync(GEMINI_ENABLEMENT_PATH)) {
+    try {
+      enablement = JSON.parse(readFileSync(GEMINI_ENABLEMENT_PATH, 'utf-8'));
+    } catch {
+      throw new Error(`Corrupt JSON in ${GEMINI_ENABLEMENT_PATH}, refusing to overwrite`);
+    }
+  }
+
+  enablement['claude-mem'] = { overrides: [`${homedir()}/*`] };
+  writeFileSync(GEMINI_ENABLEMENT_PATH, JSON.stringify(enablement, null, 2) + '\n');
+}
+
+/**
+ * Remove legacy individual skill symlinks from ~/.gemini/skills/claude-mem-*.
+ * These were created by an earlier installer version; the extension approach supersedes them.
+ */
+function cleanupLegacySkillSymlinks(): void {
+  if (!existsSync(GEMINI_SKILLS_DIR)) return;
+
+  const entries = readdirSync(GEMINI_SKILLS_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.name.startsWith(SKILL_PREFIX)) continue;
+    const entryPath = path.join(GEMINI_SKILLS_DIR, entry.name);
+    try {
+      if (lstatSync(entryPath).isSymbolicLink()) {
+        unlinkSync(entryPath);
+      }
+    } catch {
+      // ignore
+    }
+  }
+}
+
+/**
+ * Find and install Gemini CLI commands (TOML files).
+ * Commands provide the prompt that triggers skill execution — without them,
+ * Gemini skill activation only loads context but doesn't generate a response.
+ *
+ * @returns number of commands installed
+ */
+function installGeminiCommands(): number {
+  const pluginDir = findPluginDir();
+  if (!pluginDir) return 0;
+
+  const commandsSource = path.join(pluginDir, 'gemini-commands');
+  if (!existsSync(commandsSource)) return 0;
+
+  rmSync(GEMINI_COMMANDS_DIR, { recursive: true, force: true });
+  mkdirSync(GEMINI_COMMANDS_DIR, { recursive: true });
+
+  const tomlFiles = readdirSync(commandsSource).filter(f => f.endsWith('.toml'));
+  let installed = 0;
+  const failed: string[] = [];
+  for (const file of tomlFiles) {
+    try {
+      cpSync(path.join(commandsSource, file), path.join(GEMINI_COMMANDS_DIR, file));
+      installed++;
+    } catch {
+      failed.push(file);
+    }
+  }
+
+  if (failed.length > 0) {
+    throw new Error(`Failed to install Gemini command(s): ${failed.join(', ')}`);
+  }
+  return installed;
+}
+
+/**
+ * Remove claude-mem Gemini commands directory.
+ */
+function uninstallGeminiCommands(): void {
+  if (!existsSync(GEMINI_COMMANDS_DIR)) return;
+  try {
+    rmSync(GEMINI_COMMANDS_DIR, { recursive: true, force: true });
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Uninstall the claude-mem Gemini extension.
+ * Removes the extension directory and its entry in extension-enablement.json.
+ * Also cleans up any legacy skill symlinks.
+ */
+function uninstallGeminiExtension(): void {
+  // Remove extension directory
+  if (existsSync(GEMINI_EXTENSION_DIR)) {
+    rmSync(GEMINI_EXTENSION_DIR, { recursive: true, force: true });
+  }
+
+  // Remove from extension-enablement.json
+  if (existsSync(GEMINI_ENABLEMENT_PATH)) {
+    try {
+      const enablement = JSON.parse(readFileSync(GEMINI_ENABLEMENT_PATH, 'utf-8'));
+      delete enablement['claude-mem'];
+      writeFileSync(GEMINI_ENABLEMENT_PATH, JSON.stringify(enablement, null, 2) + '\n');
+    } catch {
+      // ignore
+    }
+  }
+
+  // Clean up legacy skill symlinks
+  cleanupLegacySkillSymlinks();
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -306,6 +526,21 @@ export async function installGeminiCliHooks(): Promise<number> {
     setupGeminiMdContextSection();
     console.log(`  Setup context injection in ${GEMINI_MD_PATH}`);
 
+    // Install as Gemini extension (skills + MCP server)
+    const ext = installGeminiExtension();
+    if (ext.skills > 0) {
+      console.log(`  Registered ${ext.skills} skills via extension`);
+    }
+    if (ext.mcpConfigured) {
+      console.log(`  MCP server configured in extension`);
+    }
+
+    // Install Gemini commands (TOML files that trigger skill execution)
+    const cmdCount = installGeminiCommands();
+    if (cmdCount > 0) {
+      console.log(`  Installed ${cmdCount} commands (use /claude-mem:<name> in Gemini CLI)`);
+    }
+
     // List installed events
     const eventNames = Object.keys(GEMINI_EVENT_TO_INTERNAL_EVENT);
     console.log(`  Registered ${eventNames.length} hook events:`);
@@ -318,6 +553,7 @@ export async function installGeminiCliHooks(): Promise<number> {
 Installation complete!
 
 Hooks installed to: ${GEMINI_SETTINGS_PATH}
+Extension installed to: ${GEMINI_EXTENSION_DIR}
 Using unified CLI: bun worker-service.cjs hook gemini-cli <event>
 
 Next steps:
@@ -348,45 +584,44 @@ export function uninstallGeminiCliHooks(): number {
   console.log('\nUninstalling Claude-Mem Gemini CLI hooks...\n');
 
   try {
-    if (!existsSync(GEMINI_SETTINGS_PATH)) {
-      console.log('  No Gemini CLI settings found — nothing to uninstall.');
-      return 0;
-    }
+    // Hook removal (conditional — settings may not exist)
+    if (existsSync(GEMINI_SETTINGS_PATH)) {
+      const settings = readGeminiSettings();
+      if (settings.hooks) {
+        let removedCount = 0;
 
-    const settings = readGeminiSettings();
-    if (!settings.hooks) {
-      console.log('  No hooks found in Gemini CLI settings — nothing to uninstall.');
-      return 0;
-    }
+        // Remove claude-mem hooks from within each group, preserving other hooks
+        for (const [eventName, groups] of Object.entries(settings.hooks)) {
+          const filteredGroups = groups
+            .map(group => {
+              const remainingHooks = group.hooks.filter(hook => hook.name !== HOOK_NAME);
+              removedCount += group.hooks.length - remainingHooks.length;
+              return { ...group, hooks: remainingHooks };
+            })
+            .filter(group => group.hooks.length > 0);
 
-    let removedCount = 0;
+          if (filteredGroups.length > 0) {
+            settings.hooks[eventName] = filteredGroups;
+          } else {
+            delete settings.hooks[eventName];
+          }
+        }
 
-    // Remove claude-mem hooks from within each group, preserving other hooks
-    for (const [eventName, groups] of Object.entries(settings.hooks)) {
-      const filteredGroups = groups
-        .map(group => {
-          const remainingHooks = group.hooks.filter(hook => hook.name !== HOOK_NAME);
-          removedCount += group.hooks.length - remainingHooks.length;
-          return { ...group, hooks: remainingHooks };
-        })
-        .filter(group => group.hooks.length > 0);
+        // Clean up empty hooks object
+        if (Object.keys(settings.hooks).length === 0) {
+          delete settings.hooks;
+        }
 
-      if (filteredGroups.length > 0) {
-        settings.hooks[eventName] = filteredGroups;
+        writeGeminiSettings(settings);
+        console.log(`  Removed ${removedCount} claude-mem hook(s) from ${GEMINI_SETTINGS_PATH}`);
       } else {
-        delete settings.hooks[eventName];
+        console.log('  No hooks found in Gemini CLI settings.');
       }
+    } else {
+      console.log('  No Gemini CLI settings found.');
     }
 
-    // Clean up empty hooks object
-    if (Object.keys(settings.hooks).length === 0) {
-      delete settings.hooks;
-    }
-
-    writeGeminiSettings(settings);
-    console.log(`  Removed ${removedCount} claude-mem hook(s) from ${GEMINI_SETTINGS_PATH}`);
-
-    // Remove claude-mem context section from GEMINI.md
+    // Always clean up remaining artifacts
     if (existsSync(GEMINI_MD_PATH)) {
       let mdContent = readFileSync(GEMINI_MD_PATH, 'utf-8');
       const contextRegex = /\n?<claude-mem-context>[\s\S]*?<\/claude-mem-context>\n?/;
@@ -396,6 +631,11 @@ export function uninstallGeminiCliHooks(): number {
         console.log(`  Removed context section from ${GEMINI_MD_PATH}`);
       }
     }
+
+    uninstallGeminiExtension();
+    console.log(`  Removed extension from ${GEMINI_EXTENSION_DIR}`);
+    uninstallGeminiCommands();
+    console.log(`  Removed commands from ${GEMINI_COMMANDS_DIR}`);
 
     console.log('\nUninstallation complete!\n');
     console.log('Restart Gemini CLI to apply changes.');
@@ -418,46 +658,43 @@ export function checkGeminiCliHooksStatus(): number {
     console.log('Gemini CLI settings: Not found');
     console.log(`  Expected at: ${GEMINI_SETTINGS_PATH}\n`);
     console.log('No hooks installed. Run: claude-mem install --ide gemini-cli\n');
-    return 0;
-  }
-
-  let settings: GeminiSettingsJson;
-  try {
-    settings = readGeminiSettings();
-  } catch (error) {
-    console.log(`Gemini CLI settings: ${(error as Error).message}\n`);
-    return 0;
-  }
-
-  if (!settings.hooks) {
-    console.log('Gemini CLI settings: Found, but no hooks configured\n');
-    console.log('No hooks installed. Run: claude-mem install --ide gemini-cli\n');
-    return 0;
-  }
-
-  // Check for claude-mem hooks
-  const installedEvents: string[] = [];
-  for (const [eventName, groups] of Object.entries(settings.hooks)) {
-    const hasClaudeMem = groups.some(group =>
-      group.hooks.some(hook => hook.name === HOOK_NAME)
-    );
-    if (hasClaudeMem) {
-      installedEvents.push(eventName);
+  } else {
+    let settings: GeminiSettingsJson | null = null;
+    try {
+      settings = readGeminiSettings();
+    } catch (error) {
+      console.log(`Gemini CLI settings: ${(error as Error).message}\n`);
     }
-  }
 
-  if (installedEvents.length === 0) {
-    console.log('Gemini CLI settings: Found, but no claude-mem hooks\n');
-    console.log('Run: claude-mem install --ide gemini-cli\n');
-    return 0;
-  }
+    if (settings && settings.hooks) {
+      // Check for claude-mem hooks
+      const installedEvents: string[] = [];
+      for (const [eventName, groups] of Object.entries(settings.hooks)) {
+        const hasClaudeMem = groups.some(group =>
+          group.hooks.some(hook => hook.name === HOOK_NAME)
+        );
+        if (hasClaudeMem) {
+          installedEvents.push(eventName);
+        }
+      }
 
-  console.log(`Settings: ${GEMINI_SETTINGS_PATH}`);
-  console.log(`Mode: Unified CLI (bun worker-service.cjs hook gemini-cli)`);
-  console.log(`Events: ${installedEvents.length} of ${Object.keys(GEMINI_EVENT_TO_INTERNAL_EVENT).length} mapped`);
-  for (const event of installedEvents) {
-    const internalEvent = GEMINI_EVENT_TO_INTERNAL_EVENT[event] ?? 'unknown';
-    console.log(`  ${event} → ${internalEvent}`);
+      if (installedEvents.length === 0) {
+        console.log('Gemini CLI settings: Found, but no claude-mem hooks\n');
+        console.log('Run: claude-mem install --ide gemini-cli\n');
+      } else {
+        console.log(`Settings: ${GEMINI_SETTINGS_PATH}`);
+        console.log(`Mode: Unified CLI (bun worker-service.cjs hook gemini-cli)`);
+        console.log(`Events: ${installedEvents.length} of ${Object.keys(GEMINI_EVENT_TO_INTERNAL_EVENT).length} mapped`);
+        for (const event of installedEvents) {
+          const internalEvent = GEMINI_EVENT_TO_INTERNAL_EVENT[event] ?? 'unknown';
+          console.log(`  ${event} → ${internalEvent}`);
+        }
+        console.log('');
+      }
+    } else if (settings) {
+      console.log('Gemini CLI settings: Found, but no hooks configured\n');
+      console.log('No hooks installed. Run: claude-mem install --ide gemini-cli\n');
+    }
   }
 
   // Check GEMINI.md context
@@ -470,6 +707,28 @@ export function checkGeminiCliHooksStatus(): number {
     }
   } else {
     console.log('Context: No GEMINI.md found');
+  }
+
+  // Check extension installation
+  const extManifestPath = path.join(GEMINI_EXTENSION_DIR, 'gemini-extension.json');
+  if (existsSync(extManifestPath)) {
+    console.log(`Extension: Installed at ${GEMINI_EXTENSION_DIR}`);
+    try {
+      const manifest = JSON.parse(readFileSync(extManifestPath, 'utf-8'));
+      if (manifest.mcpServers) {
+        console.log(`  MCP servers: ${Object.keys(manifest.mcpServers).join(', ')}`);
+      }
+    } catch {
+      // ignore parse errors
+    }
+    const extSkillsDir = path.join(GEMINI_EXTENSION_DIR, 'skills');
+    if (existsSync(extSkillsDir)) {
+      const skills = readdirSync(extSkillsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory() && existsSync(path.join(extSkillsDir, d.name, 'SKILL.md')));
+      console.log(`  Skills: ${skills.length} (${skills.map(s => s.name).join(', ')})`);
+    }
+  } else {
+    console.log('Extension: Not installed');
   }
 
   console.log('');
