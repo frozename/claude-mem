@@ -2681,9 +2681,17 @@ export class SessionStore {
    */
   private createPlansTable(): void {
     const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(27) as SchemaVersion | undefined;
-    if (applied) {
-      const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").all() as TableNameRow[];
-      if (tables.length > 0) return;
+    const tables = this.db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'").all() as TableNameRow[];
+
+    if (applied && tables.length > 0) {
+      // Ensure unique index exists (added after initial migration)
+      const indexes = this.db.query('PRAGMA index_list(plans)').all() as { name: string }[];
+      const hasUniqueIndex = indexes.some(idx => idx.name === 'idx_plans_file_path_unique');
+      if (!hasUniqueIndex) {
+        this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path)');
+        logger.debug('DB', 'Added unique index on plans(file_path)');
+      }
+      return;
     }
 
     this.db.run(`

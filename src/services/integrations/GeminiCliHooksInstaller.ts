@@ -425,13 +425,18 @@ function installGeminiCommands(): number {
 
   const tomlFiles = readdirSync(commandsSource).filter(f => f.endsWith('.toml'));
   let installed = 0;
+  const failed: string[] = [];
   for (const file of tomlFiles) {
     try {
       cpSync(path.join(commandsSource, file), path.join(GEMINI_COMMANDS_DIR, file));
       installed++;
     } catch {
-      // best effort
+      failed.push(file);
     }
+  }
+
+  if (failed.length > 0) {
+    throw new Error(`Failed to install Gemini command(s): ${failed.join(', ')}`);
   }
   return installed;
 }
