@@ -120,7 +120,7 @@ async function callWorkerAPI(
     }
 
     const apiPath = `${endpoint}?${searchParams}`;
-    const response = await workerHttpRequest(apiPath);
+    const response = await retryableRequest(apiPath);
 
     if (!response.ok) {
       const errorText = await response.text();

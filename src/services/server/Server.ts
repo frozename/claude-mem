@@ -53,6 +53,10 @@ export interface AiStatus {
 export interface ServerOptions {
   /** Whether initialization is complete (for readiness check) */
   getInitializationComplete: () => boolean;
+  /** Whether initialization failed permanently */
+  getInitializationFailed?: () => boolean;
+  /** Initialization duration in milliseconds (null if not yet complete) */
+  getInitDurationMs?: () => number | null;
   /** Whether MCP is ready (for health/readiness info) */
   getMcpReady: () => boolean;
   /** Shutdown function for admin endpoints */
@@ -173,6 +177,8 @@ export class Server {
         platform: process.platform,
         pid: process.pid,
         initialized: this.options.getInitializationComplete(),
+        initFailed: this.options.getInitializationFailed?.() ?? false,
+        initDurationMs: this.options.getInitDurationMs?.() ?? null,
         mcpReady: this.options.getMcpReady(),
         ai: this.options.getAiStatus(),
       });
