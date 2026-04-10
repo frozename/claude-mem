@@ -24,7 +24,7 @@
 
 import path from 'path';
 import { homedir } from 'os';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, symlinkSync, lstatSync, unlinkSync, cpSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, symlinkSync, lstatSync, unlinkSync, cpSync, rmSync } from 'fs';
 import { findWorkerServicePath, findBunPath } from './CursorHooksInstaller.js';
 import { MARKETPLACE_ROOT } from '../../shared/paths.js';
 
@@ -446,11 +446,7 @@ function installGeminiCommands(): number {
 function uninstallGeminiCommands(): void {
   if (!existsSync(GEMINI_COMMANDS_DIR)) return;
   try {
-    const files = readdirSync(GEMINI_COMMANDS_DIR);
-    for (const file of files) {
-      unlinkSync(path.join(GEMINI_COMMANDS_DIR, file));
-    }
-    require('fs').rmdirSync(GEMINI_COMMANDS_DIR);
+    rmSync(GEMINI_COMMANDS_DIR, { recursive: true, force: true });
   } catch {
     // best effort
   }
@@ -464,25 +460,7 @@ function uninstallGeminiCommands(): void {
 function uninstallGeminiExtension(): void {
   // Remove extension directory
   if (existsSync(GEMINI_EXTENSION_DIR)) {
-    // Unlink symlinks first, then remove the directory
-    for (const name of ['skills', 'scripts']) {
-      const linkPath = path.join(GEMINI_EXTENSION_DIR, name);
-      try {
-        if (lstatSync(linkPath).isSymbolicLink()) unlinkSync(linkPath);
-      } catch {
-        // not a symlink or doesn't exist
-      }
-    }
-    // Remove remaining files (gemini-extension.json)
-    try {
-      const remaining = readdirSync(GEMINI_EXTENSION_DIR);
-      for (const file of remaining) {
-        unlinkSync(path.join(GEMINI_EXTENSION_DIR, file));
-      }
-      require('fs').rmdirSync(GEMINI_EXTENSION_DIR);
-    } catch {
-      // best effort
-    }
+    rmSync(GEMINI_EXTENSION_DIR, { recursive: true, force: true });
   }
 
   // Remove from extension-enablement.json
