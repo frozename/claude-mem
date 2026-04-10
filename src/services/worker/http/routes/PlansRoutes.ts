@@ -77,21 +77,21 @@ export class PlansRoutes extends BaseRouteHandler {
       const files = (await readdir(plansDir)).filter(f => f.endsWith('.md'));
 
       for (const file of files) {
-        const filePath = join(plansDir, file);
-        if (registeredPaths.has(filePath)) continue;
-
-        const name = basename(file, '.md');
-        const content = (await readFile(filePath, 'utf-8')).slice(0, 2000);
-
-        // Try to extract phase count from content
-        const phaseMatches = content.match(/## Phase \d+/gi);
-        const phaseCount = phaseMatches ? phaseMatches.length : undefined;
-
-        // Extract a description from the first heading or first line
-        const headingMatch = content.match(/^#\s+(.+)/m);
-        const description = headingMatch ? headingMatch[1].slice(0, 200) : undefined;
-
         try {
+          const filePath = join(plansDir, file);
+          if (registeredPaths.has(filePath)) continue;
+
+          const name = basename(file, '.md');
+          const content = (await readFile(filePath, 'utf-8')).slice(0, 2000);
+
+          // Try to extract phase count from content
+          const phaseMatches = content.match(/## Phase \d+/gi);
+          const phaseCount = phaseMatches ? phaseMatches.length : undefined;
+
+          // Extract a description from the first heading or first line
+          const headingMatch = content.match(/^#\s+(.+)/m);
+          const description = headingMatch ? headingMatch[1].slice(0, 200) : undefined;
+
           store.registerPlan({
             project: queryProject,
             name,

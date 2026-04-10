@@ -2707,6 +2707,7 @@ export class SessionStore {
       CREATE INDEX IF NOT EXISTS idx_plans_project ON plans(project);
       CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status);
       CREATE INDEX IF NOT EXISTS idx_plans_created ON plans(created_at_epoch DESC);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path);
     `);
 
     this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(27, new Date().toISOString());
@@ -2725,7 +2726,7 @@ export class SessionStore {
     const nowIso = new Date(now).toISOString();
 
     const stmt = this.db.prepare(`
-      INSERT INTO plans (project, name, file_path, description, phase_count, platform_source, created_by_session, created_at, created_at_epoch)
+      INSERT OR IGNORE INTO plans (project, name, file_path, description, phase_count, platform_source, created_by_session, created_at, created_at_epoch)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
@@ -2735,6 +2736,12 @@ export class SessionStore {
       plan.platformSource ? normalizePlatformSource(plan.platformSource) : DEFAULT_PLATFORM_SOURCE,
       plan.createdBySession || null, nowIso, now
     );
+
+    if (result.changes === 0) {
+      // Duplicate file_path, fetch the existing plan
+      const existing = this.db.prepare('SELECT id, created_at_epoch FROM plans WHERE file_path = ?').get(plan.filePath) as { id: number; created_at_epoch: number };
+      return { id: Number(existing.id), createdAtEpoch: existing.created_at_epoch };
+    }
 
     logger.info('DB', 'Plan registered', { id: Number(result.lastInsertRowid), project: plan.project, name: plan.name });
     return { id: Number(result.lastInsertRowid), createdAtEpoch: now };
