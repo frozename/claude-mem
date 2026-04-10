@@ -185,6 +185,11 @@ export class Server {
           status: 'ready',
           mcpReady: this.options.getMcpReady(),
         });
+      } else if (this.options.getInitializationFailed?.()) {
+        res.status(503).json({
+          status: 'failed',
+          message: 'Worker initialization failed permanently. Restart required.',
+        });
       } else {
         res.status(503).json({
           status: 'initializing',

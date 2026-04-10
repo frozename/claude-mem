@@ -279,6 +279,15 @@ export class WorkerService {
         return;
       }
 
+      if (this.initializationFailed) {
+        res.status(503).json({
+          error: 'Service initialization failed',
+          message: 'Worker initialization failed permanently. Restart required.',
+          details: this.initializationError?.message
+        });
+        return;
+      }
+
       const timeoutMs = 30000;
       const timeoutPromise = new Promise<void>((_, reject) =>
         setTimeout(() => reject(new Error('Database initialization timeout')), timeoutMs)
@@ -286,6 +295,14 @@ export class WorkerService {
 
       try {
         await Promise.race([this.initializationComplete, timeoutPromise]);
+        if (this.initializationFailed) {
+          res.status(503).json({
+            error: 'Service initialization failed',
+            message: 'Worker initialization failed permanently. Restart required.',
+            details: this.initializationError?.message
+          });
+          return;
+        }
         next();
       } catch (error) {
         logger.error('HTTP', `Request to ${req.method} ${req.path} rejected — DB not initialized`, {}, error as Error);
@@ -345,6 +362,7 @@ export class WorkerService {
    * Background initialization - runs after HTTP server is listening
    */
   private async initializeBackground(): Promise<void> {
+    this.initStartTime = Date.now();
     try {
       await aggressiveStartupCleanup();
 
