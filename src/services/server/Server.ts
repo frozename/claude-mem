@@ -193,6 +193,7 @@ export class Server {
         });
       } else if (this.options.getInitializationFailed?.()) {
         res.status(503).json({
+          error: 'Service initialization failed',
           status: 'failed',
           message: 'Worker initialization failed permanently. Restart required.',
         });

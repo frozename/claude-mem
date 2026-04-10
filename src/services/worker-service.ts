@@ -557,7 +557,7 @@ export class WorkerService {
       logger.error('SYSTEM', 'Background initialization failed permanently', {
         durationMs: this.initDurationMs
       }, error as Error);
-      throw error;
+      return;  // Don't rethrow — start()'s .catch() would duplicate this log
     }
   }
 

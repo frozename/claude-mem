@@ -652,7 +652,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { id, ...body } = args;
       try {
-        const response = await workerHttpRequest(`/api/plans/${id}`, {
+        const response = await retryableRequest(`/api/plans/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
