@@ -377,7 +377,7 @@ function registerExtensionEnablement(): void {
     try {
       enablement = JSON.parse(readFileSync(GEMINI_ENABLEMENT_PATH, 'utf-8'));
     } catch {
-      // corrupt file — overwrite
+      throw new Error(`Corrupt JSON in ${GEMINI_ENABLEMENT_PATH}, refusing to overwrite`);
     }
   }
 
