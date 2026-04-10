@@ -519,6 +519,9 @@ export class SessionRoutes extends BaseRouteHandler {
       if (!PLATFORMS_ALLOWING_SYNTHETIC_SESSION.has(platformSource)) {
         return this.badRequest(res, 'Missing contentSessionId');
       }
+      // Deterministic: groups all observations from the same platform/project/directory
+      // on the same day into one session. Intentional for Gemini CLI which may make
+      // multiple stateless invocations within a single logical session.
       const cwdHash = createHash('sha256').update(cwd || '').digest('hex').slice(0, 8);
       contentSessionId = `${platformSource}-${project}-${cwdHash}-${new Date().toISOString().slice(0, 10)}`;
     }
@@ -559,6 +562,8 @@ export class SessionRoutes extends BaseRouteHandler {
 
       if (!isSynthesizedSession) {
         // Privacy check: skip if user prompt was entirely private
+        // Synthesized sessions (Gemini/CLI) bypass the privacy check since they don't
+        // go through the init flow that saves user prompts for privacy filtering.
         const userPrompt = PrivacyCheckValidator.checkUserPromptPrivacy(
           store,
           contentSessionId,
