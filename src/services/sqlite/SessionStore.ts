@@ -2751,6 +2751,11 @@ export class SessionStore {
     `).all(project, limit) as any[];
   }
 
+  getAllRegisteredPlanPaths(): Set<string> {
+    const rows = this.db.prepare('SELECT DISTINCT file_path FROM plans').all() as { file_path: string }[];
+    return new Set(rows.map(r => r.file_path));
+  }
+
   getPlanById(id: number): any | null {
     return (this.db.prepare('SELECT * FROM plans WHERE id = ?').get(id) as any) || null;
   }

@@ -10,7 +10,8 @@
  */
 
 import express, { Request, Response } from 'express';
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync } from 'fs';
+import { readdir, readFile } from 'fs/promises';
 import { join, basename } from 'path';
 import { homedir } from 'os';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
@@ -53,7 +54,7 @@ export class PlansRoutes extends BaseRouteHandler {
     if (!project) { this.badRequest(res, 'project query parameter is required'); return; }
 
     // Auto-register unregistered plan files from ~/.claude/plans/
-    this.autoRegisterPlans(project);
+    await this.autoRegisterPlans(project);
 
     const sessionStore = this.dbManager.getSessionStore();
     const plans = sessionStore.getPlans(project, status, limit);
@@ -61,28 +62,26 @@ export class PlansRoutes extends BaseRouteHandler {
   });
 
   /**
-   * Scan ~/.claude/plans/ for plan files not yet in the registry and register them.
-   * Extracts project context from plan file content (looks for project name mentions)
-   * or registers under the queried project if ambiguous.
+   * Scan ~/.claude/plans/ for plan files not yet registered in any project.
+   * Registers discovered plans under the querying project.
    */
-  private autoRegisterPlans(queryProject: string): void {
+  private async autoRegisterPlans(queryProject: string): Promise<void> {
     const plansDir = join(homedir(), '.claude', 'plans');
     if (!existsSync(plansDir)) return;
 
     const store = this.dbManager.getSessionStore();
-    const existingPlans = store.getPlans(queryProject, undefined, 1000);
-    const registeredPaths = new Set(existingPlans.map((p: any) => p.file_path));
+    const registeredPaths = store.getAllRegisteredPlanPaths();
 
     let registered = 0;
     try {
-      const files = readdirSync(plansDir).filter(f => f.endsWith('.md'));
+      const files = (await readdir(plansDir)).filter(f => f.endsWith('.md'));
 
       for (const file of files) {
         const filePath = join(plansDir, file);
         if (registeredPaths.has(filePath)) continue;
 
         const name = basename(file, '.md');
-        const content = readFileSync(filePath, 'utf-8').slice(0, 2000);
+        const content = (await readFile(filePath, 'utf-8')).slice(0, 2000);
 
         // Try to extract phase count from content
         const phaseMatches = content.match(/## Phase \d+/gi);
@@ -102,8 +101,11 @@ export class PlansRoutes extends BaseRouteHandler {
             platformSource: 'auto-registered',
           });
           registered++;
-        } catch {
-          // Duplicate or constraint error — skip
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!msg.includes('UNIQUE constraint') && !msg.includes('duplicate')) {
+            logger.debug('HTTP', 'Unexpected error auto-registering plan', { file, error: msg });
+          }
         }
       }
     } catch {
