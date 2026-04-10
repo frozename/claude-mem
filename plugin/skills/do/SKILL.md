@@ -21,7 +21,7 @@ Before executing, find the plan. Follow this priority order:
 2. **If the user named a plan** (e.g., `do add-user-auth`) — look for `.claude/plans/add-user-auth.md` and `~/.claude/plans/add-user-auth.md`
 3. **Otherwise, query the plan registry** for pending plans:
    - Via MCP tool: `list_plans(project="<project-name>", status="pending")`
-   - Via HTTP (use if MCP tool is not available): `curl -s "http://localhost:37777/api/plans?project=<project-name>&status=pending"`
+   - Via HTTP (use if MCP tool is not available): `curl -s --retry 3 --retry-delay 2 --retry-all-errors "http://localhost:37777/api/plans?project=<project-name>&status=pending"`
    - The project name is the basename of the current working directory
 4. **If the registry returns nothing**, scan BOTH of these locations for plan files (glob `*.md`):
    - `.claude/plans/` (project-level plans)

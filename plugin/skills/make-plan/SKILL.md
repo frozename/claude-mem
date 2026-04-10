@@ -63,7 +63,7 @@ After saving the plan file, **always register it** so `do` can discover it from 
 2. Count the implementation phases (exclude Phase 0: Documentation Discovery)
 3. Register via MCP tool `register_plan` OR via HTTP:
    ```
-   curl -s -X POST http://localhost:37777/api/plans \
+   curl -s --retry 3 --retry-delay 2 --retry-all-errors -X POST http://localhost:37777/api/plans \
      -H 'Content-Type: application/json' \
      -d '{"project":"<project-name>","name":"<plan-name>","filePath":"<absolute-path>","description":"<one-liner>","phaseCount":<N>,"platformSource":"<claude|gemini|codex>"}'
    ```
