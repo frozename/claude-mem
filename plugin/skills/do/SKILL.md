@@ -32,7 +32,7 @@ Before executing, find the plan. Follow this priority order:
 Once a plan is selected:
 - Read the plan file from its `file_path`
 - **Show the plan summary to the user and ask for confirmation before executing.** Display the phase names, key tasks, and total phase count. Wait for the user to approve before proceeding.
-- Mark it as in-progress: `update_plan(id=<plan-id>, status="in_progress")` (HTTP fallback: `curl -s -X PATCH "http://localhost:37777/api/plans/<plan-id>" -H 'Content-Type: application/json' -d '{"status":"in_progress"}'`)
+- Mark it as in-progress: `update_plan(id=<plan-id>, status="in_progress")` (HTTP fallback: `curl -s --retry 3 --retry-delay 2 --retry-all-errors -X PATCH "http://localhost:37777/api/plans/<plan-id>" -H 'Content-Type: application/json' -d '{"status":"in_progress"}'`)
 - After all phases complete successfully: `update_plan(id=<plan-id>, status="completed")`
 - If abandoned: `update_plan(id=<plan-id>, status="abandoned")`
 

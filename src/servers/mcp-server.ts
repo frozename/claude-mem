@@ -100,6 +100,65 @@ const TOOL_ENDPOINT_MAP: Record<string, string> = {
   'list_plans': '/api/plans'
 };
 
+// API call timeout: must exceed the server-side 30s init-wait middleware
+// so the caller receives the actual 503 or 200 rather than a local timeout.
+const API_CALL_TIMEOUT_MS = 35_000;
+
+/**
+ * Wrapper around workerHttpRequest with retry on 503 and timeout errors.
+ * Stops retrying if the server reports permanent initialization failure.
+ */
+async function retryableRequest(
+  apiPath: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  } = {}
+): Promise<Response> {
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 1000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await workerHttpRequest(apiPath, {
+        ...options,
+        timeoutMs: API_CALL_TIMEOUT_MS
+      });
+
+      if (response.status === 503 && attempt < MAX_RETRIES) {
+        // Check if this is a permanent failure (don't retry those)
+        const cloned = response.clone();
+        try {
+          const body = await cloned.json() as { error?: string };
+          if (body.error === 'Service initialization failed') {
+            return response;  // Permanent failure — no point retrying
+          }
+        } catch {
+          // Body parse failed — treat as transient, retry
+        }
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        logger.warn('SYSTEM', `Worker returned 503, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`, { endpoint: apiPath });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      if (attempt < MAX_RETRIES && error instanceof Error && error.message.includes('timed out')) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        logger.warn('SYSTEM', `Worker request timed out, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`, { endpoint: apiPath });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  // Final attempt after all retries exhausted
+  return workerHttpRequest(apiPath, { ...options, timeoutMs: API_CALL_TIMEOUT_MS });
+}
+
 /**
  * Call Worker HTTP API endpoint (uses socket or TCP automatically)
  */
