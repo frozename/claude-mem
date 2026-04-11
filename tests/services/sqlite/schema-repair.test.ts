@@ -14,10 +14,9 @@ import { describe, it, expect } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { ClaudeMemDatabase } from '../../../src/services/sqlite/Database.js';
 import { MigrationRunner } from '../../../src/services/sqlite/migrations/runner.js';
-import { existsSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, unlinkSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { execFileSync, execSync } from 'child_process';
 
 function tempDbPath(): string {
   return join(tmpdir(), `claude-mem-test-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
@@ -30,48 +29,28 @@ function cleanup(path: string): void {
   }
 }
 
-function hasPython(): boolean {
-  try {
-    execSync('python3 --version', { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Use Python's sqlite3 to corrupt a DB by removing the content_hash column
- * from the observations table definition while leaving the index intact.
- * This simulates what happens when a DB from a newer version is synced.
+ * Corrupt a DB by renaming 'content_hash' to 'content_nope' in the
+ * observations table definition at the binary level, while leaving the
+ * index referencing the original 'content_hash' column intact.
+ * This creates an orphaned index that triggers 'malformed database schema'.
+ *
+ * Binary approach avoids 'PRAGMA writable_schema' which modern SQLite blocks.
  */
-function corruptDbViaPython(dbPath: string): void {
-  const script = join(tmpdir(), `corrupt-${Date.now()}.py`);
-  writeFileSync(script, `
-import sqlite3, re, sys
-c = sqlite3.connect(sys.argv[1])
-c.execute("PRAGMA writable_schema = ON")
-row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='observations'").fetchone()
-if row:
-    new_sql = re.sub(r',\\s*content_hash\\s+TEXT', '', row[0])
-    c.execute("UPDATE sqlite_master SET sql = ? WHERE type='table' AND name='observations'", (new_sql,))
-c.execute("PRAGMA writable_schema = OFF")
-c.commit()
-c.close()
-`);
-  try {
-    execSync(`python3 "${script}" "${dbPath}"`, { timeout: 10000 });
-  } finally {
-    if (existsSync(script)) unlinkSync(script);
-  }
+function corruptDbViaBinaryRewrite(dbPath: string): void {
+  const data = readFileSync(dbPath);
+  // Replace 'content_hash TEXT' (only in CREATE TABLE) with same-length string.
+  // The index SQL uses 'content_hash,' (no TEXT), so this targets only the table def.
+  const search = Buffer.from('content_hash TEXT');
+  const replace = Buffer.from('content_nope TEXT');
+  const idx = data.indexOf(search);
+  if (idx === -1) throw new Error('Could not find "content_hash TEXT" in DB file for corruption');
+  replace.copy(data, idx);
+  writeFileSync(dbPath, data);
 }
 
 describe('Schema repair on malformed database', () => {
   it('should repair a database with an orphaned index referencing a non-existent column', () => {
-    if (!hasPython()) {
-      console.log('Python3 not available, skipping test');
-      return;
-    }
-
     const dbPath = tempDbPath();
     try {
       // Step 1: Create a valid database with all migrations
@@ -91,8 +70,8 @@ describe('Schema repair on malformed database', () => {
       db.run('PRAGMA wal_checkpoint(TRUNCATE)');
       db.close();
 
-      // Step 2: Corrupt the DB
-      corruptDbViaPython(dbPath);
+      // Step 2: Corrupt the DB via binary rewrite
+      corruptDbViaBinaryRewrite(dbPath);
 
       // Step 3: Verify the DB is actually corrupted
       const corruptDb = new Database(dbPath, { readwrite: true });
@@ -146,34 +125,25 @@ describe('Schema repair on malformed database', () => {
   });
 
   it('should repair a corrupted DB that has no schema_versions table', () => {
-    if (!hasPython()) {
-      console.log('Python3 not available, skipping test');
-      return;
-    }
-
     const dbPath = tempDbPath();
-    const scriptPath = join(tmpdir(), `corrupt-nosv-${Date.now()}.py`);
     try {
-      // Build a minimal DB with only a malformed observations table and orphaned index
-      // — no schema_versions table. This simulates a partially-initialized DB that was
-      // synced before migrations ever ran.
-      writeFileSync(scriptPath, `
-import sqlite3, sys
-c = sqlite3.connect(sys.argv[1])
-c.execute('PRAGMA writable_schema = ON')
-# Inject an orphaned index into sqlite_master without any backing table.
-# This simulates a partially-synced DB where index metadata arrived but
-# the table schema is incomplete or missing columns.
-idx_sql = 'CREATE INDEX idx_observations_content_hash ON observations(content_hash, created_at_epoch)'
-c.execute(
-  "INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES ('index', 'idx_observations_content_hash', 'observations', 0, ?)",
-  (idx_sql,)
-)
-c.execute('PRAGMA writable_schema = OFF')
-c.commit()
-c.close()
-`);
-      execFileSync('python3', [scriptPath, dbPath], { timeout: 10000 });
+      // Build a fully-migrated DB, then drop schema_versions and corrupt the
+      // observations table definition. This simulates a partially-initialized DB
+      // synced before migrations ran.
+      const db = new Database(dbPath, { create: true, readwrite: true });
+      db.run('PRAGMA journal_mode = WAL');
+      db.run('PRAGMA foreign_keys = OFF');
+
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+
+      // Drop schema_versions to simulate partial sync
+      db.run('DROP TABLE IF EXISTS schema_versions');
+      db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+      db.close();
+
+      // Binary-corrupt the observations table definition (orphans the index)
+      corruptDbViaBinaryRewrite(dbPath);
 
       // Verify it's corrupted
       const corruptDb = new Database(dbPath, { readwrite: true });
@@ -198,16 +168,10 @@ c.close()
       repaired.close();
     } finally {
       cleanup(dbPath);
-      if (existsSync(scriptPath)) unlinkSync(scriptPath);
     }
   });
 
   it('should preserve existing data through repair and re-migration', () => {
-    if (!hasPython()) {
-      console.log('Python3 not available, skipping test');
-      return;
-    }
-
     const dbPath = tempDbPath();
     try {
       // Step 1: Create a fully migrated DB and insert a session + observation
@@ -233,8 +197,8 @@ c.close()
       db.run('PRAGMA wal_checkpoint(TRUNCATE)');
       db.close();
 
-      // Step 2: Corrupt the DB
-      corruptDbViaPython(dbPath);
+      // Step 2: Corrupt the DB via binary rewrite
+      corruptDbViaBinaryRewrite(dbPath);
 
       // Step 3: Repair via ClaudeMemDatabase
       const repaired = new ClaudeMemDatabase(dbPath);

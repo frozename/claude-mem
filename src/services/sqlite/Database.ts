@@ -1,8 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { execFileSync } from 'child_process';
-import { existsSync, unlinkSync, writeFileSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
+import { spawnSync } from 'child_process';
 import { DATA_DIR, DB_PATH, ensureDir } from '../../shared/paths.js';
 import { logger } from '../../utils/logger.js';
 import { MigrationRunner } from './migrations/runner.js';
@@ -29,10 +26,11 @@ let dbInstance: Database | null = null;
  * an index referencing a non-existent column, which prevents ALL queries —
  * including the migrations that would fix the schema.
  *
- * The fix: use Python's sqlite3 module (which supports writable_schema) to
- * drop the orphaned schema objects, then let the migration system recreate
- * them properly. bun:sqlite doesn't allow DELETE FROM sqlite_master even
- * with writable_schema = ON.
+ * The fix: use the sqlite3 CLI tool (which supports writable_schema reliably
+ * across versions) to drop the orphaned schema objects, then let the migration
+ * system recreate them properly. bun:sqlite doesn't allow DELETE FROM
+ * sqlite_master even with writable_schema = ON, and Python's sqlite3 module
+ * may block schema modifications on newer SQLite builds.
  */
 function repairMalformedSchema(db: Database): void {
   try {
@@ -66,44 +64,42 @@ function repairMalformedSchema(db: Database): void {
       throw error;
     }
 
-    // Close the connection so Python can safely modify the file
+    // Close the connection so sqlite3 CLI can safely modify the file
     db.close();
 
-    // Use Python's sqlite3 module to drop the orphaned object and reset
-    // related migration versions so they re-run and recreate things properly.
-    // bun:sqlite doesn't support DELETE FROM sqlite_master even with writable_schema.
+    // Use sqlite3 CLI to drop the orphaned object and reset migration versions
+    // so they re-run and recreate things properly. The CLI's writable_schema
+    // support works reliably across SQLite versions, unlike Python's sqlite3
+    // module which may block schema modifications on newer SQLite builds.
+    // bun:sqlite also doesn't support DELETE FROM sqlite_master even with writable_schema.
     //
-    // We write a temp script rather than using -c to avoid shell escaping issues
-    // with paths containing spaces or special characters. execFileSync passes
-    // args directly without a shell, so dbPath and objectName are safe.
-    const scriptPath = join(tmpdir(), `claude-mem-repair-${Date.now()}.py`);
+    // Sanitize objectName to prevent SQL injection (schema object names are
+    // alphanumeric + underscore only).
+    const safeObjectName = objectName.replace(/[^a-zA-Z0-9_]/g, '');
+
+    // Step 1: Drop the orphaned schema object via writable_schema
+    const dropSql = [
+      'PRAGMA writable_schema = ON;',
+      `DELETE FROM sqlite_master WHERE name = '${safeObjectName}';`,
+      'PRAGMA writable_schema = OFF;',
+    ].join('\n');
+
     try {
-      writeFileSync(scriptPath, `
-import sqlite3, sys
-db_path = sys.argv[1]
-obj_name = sys.argv[2]
-c = sqlite3.connect(db_path)
-c.execute('PRAGMA writable_schema = ON')
-c.execute('DELETE FROM sqlite_master WHERE name = ?', (obj_name,))
-c.execute('PRAGMA writable_schema = OFF')
-# Reset migration versions so affected migrations re-run.
-# Guard with existence check: schema_versions may not exist on a very fresh DB.
-has_sv = c.execute(
-  "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_versions'"
-).fetchone()[0]
-if has_sv:
-  c.execute('DELETE FROM schema_versions')
-c.commit()
-c.close()
-`);
-      execFileSync('python3', [scriptPath, dbPath, objectName], { timeout: 10000 });
-      logger.info('DB', `Dropped orphaned schema object "${objectName}" and reset migration versions via Python sqlite3. All migrations will re-run (they are idempotent).`);
-    } catch (pyError: unknown) {
-      const pyMessage = pyError instanceof Error ? pyError.message : String(pyError);
-      logger.error('DB', 'Python sqlite3 repair failed', { error: pyMessage });
-      throw new Error(`Schema repair failed: ${message}. Python repair error: ${pyMessage}`);
-    } finally {
-      if (existsSync(scriptPath)) unlinkSync(scriptPath);
+      const dropResult = spawnSync('sqlite3', [dbPath], { input: dropSql, timeout: 10000 });
+      if (dropResult.status !== 0) {
+        const stderr = dropResult.stderr?.toString() || '';
+        throw new Error(`sqlite3 CLI exited with code ${dropResult.status}: ${stderr}`);
+      }
+
+      // Step 2: Reset migration versions so affected migrations re-run.
+      // schema_versions may not exist on a very fresh DB — ignore errors.
+      spawnSync('sqlite3', [dbPath], { input: 'DELETE FROM schema_versions;', timeout: 10000 });
+
+      logger.info('DB', `Dropped orphaned schema object "${safeObjectName}" and reset migration versions via sqlite3 CLI. All migrations will re-run (they are idempotent).`);
+    } catch (cliError: unknown) {
+      const cliMessage = cliError instanceof Error ? cliError.message : String(cliError);
+      logger.error('DB', 'sqlite3 CLI repair failed', { error: cliMessage });
+      throw new Error(`Schema repair failed: ${message}. sqlite3 CLI repair error: ${cliMessage}`);
     }
   }
 }

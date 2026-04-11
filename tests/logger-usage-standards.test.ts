@@ -24,6 +24,7 @@ const EXCLUDED_PATTERNS = [
   /\.d\.ts$/,            // Type declaration files
   /^ui\//,               // UI components (separate logging context)
   /^bin\//,              // CLI utilities (may use console.log for output)
+  /^npx-cli\//,          // NPX CLI commands (interactive TTY output)
   /index\.ts$/,          // Re-export files
   /logger\.ts$/,         // Logger itself
   /hook-response\.ts$/,  // Pure data structure
@@ -32,12 +33,13 @@ const EXCLUDED_PATTERNS = [
   /bun-path\.ts$/,       // Path utilities
   /migrations\.ts$/,     // Database migrations (console.log for migration output)
   /worker-service\.ts$/, // CLI entry point with interactive setup wizard (console.log for user prompts)
-  /integrations\/.*Installer\.ts$/, // CLI installer commands (console.log for interactive installation output)
+  /integrations\/.*(?:Installer|Integrations)\.ts$/, // CLI installer/integration commands (console.log for interactive output)
   /SettingsDefaultsManager\.ts$/,  // Must use console.log to avoid circular dependency with logger
   /user-message-hook\.ts$/,  // Deprecated - kept for reference only, not registered in hooks.json
   /cli\/hook-command\.ts$/,  // CLI hook command uses console.log/error for hook protocol output
   /cli\/handlers\/user-message\.ts$/,  // User message handler uses console.error for user-visible context
   /services\/transcripts\/cli\.ts$/,  // CLI transcript subcommands use console.log for user-visible interactive output
+  /smart-file-read\/parser\.ts$/,  // Grammar resolution error logging during tree-sitter setup
 ];
 
 // Files that should always use logger (core business logic)
