@@ -186,12 +186,17 @@ async function callWorkerAPI(
       throw new Error(`Worker API error (${response.status}): ${errorText}`);
     }
 
-    const data = await response.json() as { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+    const data = await response.json();
 
     logger.debug('SYSTEM', '← Worker API success', undefined, { endpoint });
 
-    // Worker returns { content: [...] } format directly
-    return data;
+    // Wrap raw worker data in MCP format (same as callWorkerAPIPost)
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify(data, null, 2)
+      }]
+    };
   } catch (error) {
     logger.error('SYSTEM', '← Worker API error', { endpoint }, error as Error);
     return {
