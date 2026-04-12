@@ -7,6 +7,7 @@ import { MigrationRunner } from './migrations/runner.js';
 // SQLite configuration constants
 const SQLITE_MMAP_SIZE_BYTES = 256 * 1024 * 1024; // 256MB
 const SQLITE_CACHE_SIZE_PAGES = 10_000;
+const MAX_SCHEMA_REPAIR_ATTEMPTS = 5;
 
 export interface Migration {
   version: number;
@@ -114,7 +115,7 @@ function repairMalformedSchema(db: Database): void {
  * Wrapper that handles the close/reopen cycle needed for schema repair.
  * Returns a (possibly new) Database connection.
  */
-function repairMalformedSchemaWithReopen(dbPath: string, db: Database): Database {
+function repairMalformedSchemaWithReopen(dbPath: string, db: Database, depth: number = 0): Database {
   try {
     db.query('SELECT name FROM sqlite_master WHERE type = "table" LIMIT 1').all();
     return db;
@@ -124,12 +125,17 @@ function repairMalformedSchemaWithReopen(dbPath: string, db: Database): Database
       throw error;
     }
 
+    if (depth >= MAX_SCHEMA_REPAIR_ATTEMPTS) {
+      logger.error('DB', `Schema repair exceeded ${MAX_SCHEMA_REPAIR_ATTEMPTS} attempts, giving up`, { error: message });
+      throw new Error(`Schema repair failed after ${MAX_SCHEMA_REPAIR_ATTEMPTS} attempts: ${message}`);
+    }
+
     // repairMalformedSchema closes the DB internally for Python access
     repairMalformedSchema(db);
 
     // Reopen and check for additional malformed objects
     const newDb = new Database(dbPath, { create: true, readwrite: true });
-    return repairMalformedSchemaWithReopen(dbPath, newDb);
+    return repairMalformedSchemaWithReopen(dbPath, newDb, depth + 1);
   }
 }
 
