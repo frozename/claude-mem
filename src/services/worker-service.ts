@@ -139,6 +139,10 @@ export class WorkerService {
   private mcpReady: boolean = false;
   private initializationCompleteFlag: boolean = false;
   private isShuttingDown: boolean = false;
+  private initializationFailed: boolean = false;
+  private initializationError: Error | null = null;
+  private initStartTime: number = 0;
+  private initDurationMs: number | null = null;
 
   // Service layer
   private dbManager: DatabaseManager;
@@ -214,6 +218,8 @@ export class WorkerService {
     // Initialize HTTP server with core routes
     this.server = new Server({
       getInitializationComplete: () => this.initializationCompleteFlag,
+      getInitializationFailed: () => this.initializationFailed,
+      getInitDurationMs: () => this.initDurationMs,
       getMcpReady: () => this.mcpReady,
       onShutdown: () => this.shutdown(),
       onRestart: () => this.shutdown(),
@@ -279,6 +285,15 @@ export class WorkerService {
         return;
       }
 
+      if (this.initializationFailed) {
+        res.status(503).json({
+          error: 'Service initialization failed',
+          message: 'Worker initialization failed permanently. Restart required.',
+          details: this.initializationError?.message
+        });
+        return;
+      }
+
       const timeoutMs = 30000;
       const timeoutPromise = new Promise<void>((_, reject) =>
         setTimeout(() => reject(new Error('Database initialization timeout')), timeoutMs)
@@ -286,6 +301,14 @@ export class WorkerService {
 
       try {
         await Promise.race([this.initializationComplete, timeoutPromise]);
+        if (this.initializationFailed) {
+          res.status(503).json({
+            error: 'Service initialization failed',
+            message: 'Worker initialization failed permanently. Restart required.',
+            details: this.initializationError?.message
+          });
+          return;
+        }
         next();
       } catch (error) {
         logger.error('HTTP', `Request to ${req.method} ${req.path} rejected — DB not initialized`, {}, error as Error);
@@ -345,6 +368,7 @@ export class WorkerService {
    * Background initialization - runs after HTTP server is listening
    */
   private async initializeBackground(): Promise<void> {
+    this.initStartTime = Date.now();
     try {
       await aggressiveStartupCleanup();
 
@@ -417,9 +441,12 @@ export class WorkerService {
       // DB and search are ready — mark initialization complete so hooks can proceed.
       // MCP connection is tracked separately via mcpReady and is NOT required for
       // the worker to serve context/search requests.
+      this.initDurationMs = Date.now() - this.initStartTime;
       this.initializationCompleteFlag = true;
       this.resolveInitialization();
-      logger.info('SYSTEM', 'Core initialization complete (DB + search ready)');
+      logger.info('SYSTEM', 'Core initialization complete (DB + search ready)', {
+        durationMs: this.initDurationMs
+      });
 
       await this.startTranscriptWatcher(settings);
 
@@ -523,8 +550,14 @@ export class WorkerService {
         logger.error('SYSTEM', 'Auto-recovery of pending queues failed', {}, error as Error);
       });
     } catch (error) {
-      logger.error('SYSTEM', 'Background initialization failed', {}, error as Error);
-      throw error;
+      this.initializationFailed = true;
+      this.initializationError = error as Error;
+      this.initDurationMs = Date.now() - this.initStartTime;
+      this.resolveInitialization();  // Unblock all waiting requests immediately
+      logger.error('SYSTEM', 'Background initialization failed permanently', {
+        durationMs: this.initDurationMs
+      }, error as Error);
+      return;  // Don't rethrow — start()'s .catch() would duplicate this log
     }
   }
 

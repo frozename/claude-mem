@@ -100,6 +100,69 @@ const TOOL_ENDPOINT_MAP: Record<string, string> = {
   'list_plans': '/api/plans'
 };
 
+// API call timeout: must exceed the server-side 30s init-wait middleware
+// so the caller receives the actual 503 or 200 rather than a local timeout.
+const API_CALL_TIMEOUT_MS = 35_000;
+
+/**
+ * Wrapper around workerHttpRequest with retry on 503 and timeout errors.
+ * Stops retrying if the server reports permanent initialization failure.
+ */
+async function retryableRequest(
+  apiPath: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  } = {}
+): Promise<Response> {
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 1000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await workerHttpRequest(apiPath, {
+        ...options,
+        timeoutMs: API_CALL_TIMEOUT_MS
+      });
+
+      if (response.status === 503 && attempt < MAX_RETRIES) {
+        // Check if this is a permanent failure (don't retry those)
+        try {
+          const bodyText = await response.text();
+          const body = JSON.parse(bodyText) as { error?: string };
+          if (body.error === 'Service initialization failed') {
+            return new Response(bodyText, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers
+            });
+          }
+        } catch {
+          // Body parse failed — treat as transient, retry
+        }
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        logger.warn('SYSTEM', `Worker returned 503, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`, { endpoint: apiPath });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      if (attempt < MAX_RETRIES && error instanceof Error && error.message.includes('timed out')) {
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        logger.warn('SYSTEM', `Worker request timed out, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`, { endpoint: apiPath });
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  // unreachable
+  throw new Error("unreachable");
+}
+
 /**
  * Call Worker HTTP API endpoint (uses socket or TCP automatically)
  */
@@ -120,19 +183,24 @@ async function callWorkerAPI(
     }
 
     const apiPath = `${endpoint}?${searchParams}`;
-    const response = await workerHttpRequest(apiPath);
+    const response = await retryableRequest(apiPath);
 
     if (!response.ok) {
       const errorText = await response.text();
       throw new Error(`Worker API error (${response.status}): ${errorText}`);
     }
 
-    const data = await response.json() as { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+    const data = await response.json();
 
     logger.debug('SYSTEM', '← Worker API success', undefined, { endpoint });
 
-    // Worker returns { content: [...] } format directly
-    return data;
+    // Wrap raw worker data in MCP format (same as callWorkerAPIPost)
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify(data, null, 2)
+      }]
+    };
   } catch (error) {
     logger.error('SYSTEM', '← Worker API error', { endpoint }, error as Error);
     return {
@@ -155,7 +223,7 @@ async function callWorkerAPIPost(
   logger.debug('HTTP', 'Worker API request (POST)', undefined, { endpoint });
 
   try {
-    const response = await workerHttpRequest(endpoint, {
+    const response = await retryableRequest(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -593,7 +661,7 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     handler: async (args: any) => {
       const { id, ...body } = args;
       try {
-        const response = await workerHttpRequest(`/api/plans/${id}`, {
+        const response = await retryableRequest(`/api/plans/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)
