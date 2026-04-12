@@ -10,7 +10,8 @@
  * Value: Prevents the silent 503 failure loop when a DB is synced between
  * machines running different claude-mem versions
  */
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, spyOn } from 'bun:test';
+import * as cp from 'child_process';
 import { Database } from 'bun:sqlite';
 import { ClaudeMemDatabase } from '../../../src/services/sqlite/Database.js';
 import { MigrationRunner } from '../../../src/services/sqlite/migrations/runner.js';
@@ -210,6 +211,44 @@ describe('Schema repair on malformed database', () => {
       expect(observations.count).toBe(1);
 
       repaired.close();
+    } finally {
+      cleanup(dbPath);
+    }
+  });
+
+  it('should throw after max repair attempts instead of infinite recursion', () => {
+    const dbPath = tempDbPath();
+    try {
+      // Create a fully migrated DB
+      const db = new Database(dbPath, { create: true, readwrite: true });
+      db.run('PRAGMA journal_mode = WAL');
+      const runner = new MigrationRunner(db);
+      runner.runAllMigrations();
+      db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+      db.close();
+
+      corruptDbViaBinaryRewrite(dbPath);
+
+      // Patch the sqlite3 CLI to be a no-op — it exits 0 but doesn't
+      // modify the database. This simulates "DELETE matched no rows".
+      let callCount = 0;
+      const originalSpawnSync = cp.spawnSync;
+      const spy = spyOn(cp, 'spawnSync').mockImplementation((...args: any[]) => {
+        if (args[0] === 'sqlite3') {
+          callCount++;
+          // Return success but don't actually run sqlite3
+          return { status: 0, stdout: Buffer.from(''), stderr: Buffer.from(''), pid: 0, output: [], signal: null } as any;
+        }
+        return originalSpawnSync(...args);
+      });
+
+      try {
+        expect(() => new ClaudeMemDatabase(dbPath)).toThrow(/Schema repair failed after/);
+        // Should have attempted repair multiple times
+        expect(callCount).toBeGreaterThanOrEqual(2);
+      } finally {
+        spy.mockRestore();
+      }
     } finally {
       cleanup(dbPath);
     }
