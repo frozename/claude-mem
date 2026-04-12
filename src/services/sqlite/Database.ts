@@ -80,7 +80,7 @@ function repairMalformedSchema(db: Database): void {
     // Step 1: Drop the orphaned schema object via writable_schema
     const dropSql = [
       'PRAGMA writable_schema = ON;',
-      `DELETE FROM sqlite_master WHERE name = '${safeObjectName}';`,
+      `DELETE FROM sqlite_master WHERE name = '${safeObjectName}' AND type = 'index';`,
       'PRAGMA writable_schema = OFF;',
     ].join('\n');
 
@@ -93,7 +93,13 @@ function repairMalformedSchema(db: Database): void {
 
       // Step 2: Reset migration versions so affected migrations re-run.
       // schema_versions may not exist on a very fresh DB — ignore errors.
-      spawnSync('sqlite3', [dbPath], { input: 'DELETE FROM schema_versions;', timeout: 10000 });
+      const resetResult = spawnSync('sqlite3', [dbPath], { input: 'DELETE FROM schema_versions;', timeout: 10000 });
+      if (resetResult.status !== 0) {
+        const stderr = resetResult.stderr?.toString() || '';
+        if (!stderr.includes('no such table')) {
+          throw new Error(`Failed to reset migration versions: ${stderr}`);
+        }
+      }
 
       logger.info('DB', `Dropped orphaned schema object "${safeObjectName}" and reset migration versions via sqlite3 CLI. All migrations will re-run (they are idempotent).`);
     } catch (cliError: unknown) {

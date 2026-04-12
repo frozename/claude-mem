@@ -2689,8 +2689,15 @@ export class SessionStore {
       const hasUniqueIndex = indexes.some(idx => idx.name === 'idx_plans_file_path_unique');
       if (!hasUniqueIndex) {
         // Deduplicate before creating unique index (existing data may have duplicates)
-        this.db.run('DELETE FROM plans WHERE id NOT IN (SELECT MAX(id) FROM plans GROUP BY file_path)');
-        this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path)');
+        this.db.run('BEGIN');
+        try {
+          this.db.run('DELETE FROM plans WHERE id NOT IN (SELECT MAX(id) FROM plans GROUP BY file_path)');
+          this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_file_path_unique ON plans(file_path)');
+          this.db.run('COMMIT');
+        } catch (e) {
+          this.db.run('ROLLBACK');
+          throw e;
+        }
         logger.debug('DB', 'Added unique index on plans(file_path)');
       }
       return;

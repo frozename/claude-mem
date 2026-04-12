@@ -354,6 +354,8 @@ describe("Observation I/O event handlers", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     assert.ok(logs.some((l) => l.includes("Session preserved after compaction")));
+    const initRequests = receivedRequests.filter((r) => r.url === "/api/sessions/init");
+    assert.equal(initRequests.length, 0, "after_compaction should NOT trigger init");
   });
 
   it("before_agent_start calls init for session privacy check", async () => {
@@ -373,6 +375,7 @@ describe("Observation I/O event handlers", () => {
 
     // Establish contentSessionId via session_start
     await fireEvent("session_start", { sessionId: "s1" }, { sessionKey: "test-agent" });
+    await fireEvent("before_agent_start", { prompt: "test" }, { sessionKey: "test-agent" });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Fire tool result event (workspaceDir required for observation to be sent)

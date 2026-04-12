@@ -128,11 +128,15 @@ async function retryableRequest(
 
       if (response.status === 503 && attempt < MAX_RETRIES) {
         // Check if this is a permanent failure (don't retry those)
-        const cloned = response.clone();
         try {
-          const body = await cloned.json() as { error?: string };
+          const bodyText = await response.text();
+          const body = JSON.parse(bodyText) as { error?: string };
           if (body.error === 'Service initialization failed') {
-            return response;  // Permanent failure — no point retrying
+            return new Response(bodyText, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers
+            });
           }
         } catch {
           // Body parse failed — treat as transient, retry
@@ -155,8 +159,8 @@ async function retryableRequest(
     }
   }
 
-  // Final attempt after all retries exhausted
-  return workerHttpRequest(apiPath, { ...options, timeoutMs: API_CALL_TIMEOUT_MS });
+  // unreachable
+  throw new Error("unreachable");
 }
 
 /**
