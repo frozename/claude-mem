@@ -1,11 +1,12 @@
 /**
  * Tests for malformed schema repair in Database.ts
  *
- * Mock Justification: NONE (0% mock code)
+ * Mock Justification: spyOn(cp, 'spawnSync') in recursion-guard test only
  * - Uses real SQLite with temp file — tests actual schema repair logic
- * - Uses Python sqlite3 to simulate cross-version schema corruption
+ * - Binary rewrite to simulate cross-version schema corruption
  *   (bun:sqlite doesn't allow writable_schema modifications)
  * - Covers the cross-machine sync scenario from issue #1307
+ * - Recursion guard test mocks spawnSync to simulate failed repair (no-op CLI)
  *
  * Value: Prevents the silent 503 failure loop when a DB is synced between
  * machines running different claude-mem versions
@@ -243,9 +244,10 @@ describe('Schema repair on malformed database', () => {
       });
 
       try {
-        expect(() => new ClaudeMemDatabase(dbPath)).toThrow(/Schema repair failed after/);
-        // Should have attempted repair multiple times
-        expect(callCount).toBeGreaterThanOrEqual(2);
+        expect(() => new ClaudeMemDatabase(dbPath)).toThrow(/Schema repair failed after 5 attempts/);
+        // Each attempt calls sqlite3 twice (drop + reset), so 5 attempts = 10 sqlite3 calls.
+        // Attempts 0-4 run repairMalformedSchema; attempt 5 hits the guard and throws.
+        expect(callCount).toBe(10);
       } finally {
         spy.mockRestore();
       }

@@ -127,6 +127,7 @@ function repairMalformedSchemaWithReopen(dbPath: string, db: Database, depth: nu
 
     if (depth >= MAX_SCHEMA_REPAIR_ATTEMPTS) {
       logger.error('DB', `Schema repair exceeded ${MAX_SCHEMA_REPAIR_ATTEMPTS} attempts, giving up`, { error: message });
+      try { db.close(); } catch { /* already closed or unusable */ }
       throw new Error(`Schema repair failed after ${MAX_SCHEMA_REPAIR_ATTEMPTS} attempts: ${message}`);
     }
 
