@@ -10,7 +10,7 @@ import { homedir } from 'os';
 import { unlinkSync } from 'fs';
 import { SessionStore } from '../sqlite/SessionStore.js';
 import { logger } from '../../utils/logger.js';
-import { getProjectName } from '../../utils/project-name.js';
+import { getProjectContext } from '../../utils/project-name.js';
 
 import type { ContextInput, ContextConfig, Observation, SessionSummary } from './types.js';
 import { loadContextConfig } from './ContextConfigLoader.js';
@@ -49,14 +49,18 @@ const VERSION_MARKER_PATH = path.join(
 function initializeDatabase(): SessionStore | null {
   try {
     return new SessionStore();
-  } catch (error: any) {
-    if (error.code === 'ERR_DLOPEN_FAILED') {
+  } catch (error: unknown) {
+    if (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ERR_DLOPEN_FAILED') {
       try {
         unlinkSync(VERSION_MARKER_PATH);
       } catch (unlinkError) {
-        logger.debug('SYSTEM', 'Marker file cleanup failed (may not exist)', {}, unlinkError as Error);
+        if (unlinkError instanceof Error) {
+          logger.debug('WORKER', 'Marker file cleanup failed (may not exist)', {}, unlinkError);
+        } else {
+          logger.debug('WORKER', 'Marker file cleanup failed (may not exist)', { error: String(unlinkError) });
+        }
       }
-      logger.error('SYSTEM', 'Native module rebuild needed - restart Claude Code to auto-fix');
+      logger.error('WORKER', 'Native module rebuild needed - restart Claude Code to auto-fix');
       return null;
     }
     throw error;
@@ -129,11 +133,14 @@ export async function generateContext(
 ): Promise<string> {
   const config = loadContextConfig();
   const cwd = input?.cwd ?? process.cwd();
-  const project = getProjectName(cwd);
-  const platformSource = input?.platform_source;
+  const context = getProjectContext(cwd);
 
-  // Use provided projects array (for worktree support) or fall back to single project
-  const projects = input?.projects || [project];
+  // Single source of truth: explicit projects override cwd-derived context.
+  // `project` (used for header + single-project query) is always the last entry
+  // of `projects` so the empty-state header and the query target stay in sync
+  // when a caller passes `projects` without a matching cwd (e.g. worker route).
+  const projects = input?.projects?.length ? input.projects : context.allProjects;
+  const project = projects[projects.length - 1] ?? context.primary;
 
   // Full mode: fetch all observations but keep normal rendering (level 1 summaries)
   if (input?.full) {
@@ -150,11 +157,11 @@ export async function generateContext(
   try {
     // Query data for all projects (supports worktree: parent + worktree combined)
     const observations = projects.length > 1
-      ? queryObservationsMulti(db, projects, config, platformSource)
-      : queryObservations(db, project, config, platformSource);
+      ? queryObservationsMulti(db, projects, config)
+      : queryObservations(db, project, config);
     const summaries = projects.length > 1
-      ? querySummariesMulti(db, projects, config, platformSource)
-      : querySummaries(db, project, config, platformSource);
+      ? querySummariesMulti(db, projects, config)
+      : querySummaries(db, project, config);
 
     // Handle empty state
     if (observations.length === 0 && summaries.length === 0) {

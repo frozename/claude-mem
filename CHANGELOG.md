@@ -4,6 +4,450 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [12.3.8] - 2026-04-21
+
+## 🔧 Fix
+
+**Detect PID reuse in the worker start-guard so containers can restart cleanly.** (#2082)
+
+The `kill(pid, 0)` liveness check false-positived when the worker's PID file outlived its PID namespace — most commonly after `docker stop` / `docker start` with a bind-mounted `~/.claude-mem`. The new worker would boot as the same low PID (often 11) as the old one, `kill(0)` would report "alive," and the worker would refuse to start *against its own prior incarnation*. Symptom: container appeared to start, immediately exited cleanly with no user-visible error, worker never came up.
+
+### What changed
+
+- Capture an opaque **process-start identity token** alongside the PID and verify identity, not just liveness:
+  - **Linux**: `/proc/<pid>/stat` field 22 (starttime in jiffies) — cheap, no exec, same signal `pgrep`/`systemd` use.
+  - **macOS / POSIX**: `ps -p <pid> -o lstart=` with `LC_ALL=C` pinned so the emitted timestamp is locale-independent across environments.
+  - **Windows**: unchanged — falls back to liveness-only. The PID-reuse scenario doesn't affect Windows deployments the way containers do.
+- `verifyPidFileOwnership` emits a DEBUG log when liveness passes but the token mismatches, so the "PID reused" case is distinguishable from "process dead" in production logs.
+- PID files written by older versions are token-less; `verifyPidFileOwnership` falls back to the existing liveness-only behavior for backwards compatibility. **No migration required.**
+
+### Surface
+
+Shared helpers (`PidInfo`, `captureProcessStartToken`, `verifyPidFileOwnership`) live in `src/supervisor/process-registry.ts` and are re-exported from `ProcessManager.ts` to preserve the existing public surface. Both entry points updated: `worker-service.ts` GUARD 1 and `supervisor/index.ts` `validateWorkerPidFile`.
+
+### Tests
+
++14 new tests covering token capture, ownership verification, backwards compatibility for tokenless PID files, and the container-restart regression scenario. Zero regressions.
+
+## [12.3.7] - 2026-04-20
+
+## What's Changed
+
+**Refactor: remove bearer auth and platform_source context filter** (#2081)
+
+- Drop bearer-token auth from the worker API. Worker binds localhost-only and CORS restricts origins to localhost — the token added friction for every internal client (hooks, CLI, viewer, sync script) with no real security benefit for single-user local deployments.
+- Drop the unused `platform_source` query-time filter from the `/api/context/inject` pipeline (ContextBuilder, ObservationCompiler, SearchRoutes, context handler, transcripts processor). The DB column stays — only the WHERE-clause filter and its plumbing are removed.
+- Replace the removed auth with a simple in-memory rate limiter (300 req/min) as a lightweight compensating control. Limiter normalises IPv4-mapped IPv6, emits `Retry-After` on 429, and has a size-guarded prune that never runs on localhost.
+
+## Cleanup
+
+- Deleted `src/shared/auth-token.ts` and all its dependents (`worker-utils.ts` Authorization header, `ViewerRoutes.ts` token injection, CORS `allowedHeaders: ['Authorization']`, `sync-marketplace.cjs` admin restart header).
+- Stopped tracking `.docker-blowout-data/claude-mem.db` and added the directory to `.gitignore`.
+
+## Full Changelog
+https://github.com/thedotmack/claude-mem/compare/v12.3.6...v12.3.7
+
+## [12.3.6] - 2026-04-20
+
+## Viewer fix: drop the rate limiter
+
+v12.3.5 kept the 300 req/min rate limiter from v12.3.3's "security hardening" bundle. That tripped the live viewer within seconds (it polls logs and stats) and served it "Rate limit exceeded" errors.
+
+**Fix**: remove the rate limiter entirely. The worker is localhost-only (enforced via CORS), so there's no abuse surface to protect. Rate-limiting a single-user local process is security theater.
+
+### Still kept from v12.3.3 hardening
+- 5 MB JSON body limit
+- Path traversal protection
+- Localhost-only CORS
+- Everything else from v12.3.5
+
+No upgrade action required.
+
+## [12.3.5] - 2026-04-20
+
+## Restored v12.3.3 fixes minus bearer auth
+
+v12.3.3 shipped 25 bug fixes under "Issue Blowout 2026" but also introduced bearer-token auth that broke SessionStart context injection for everyone. v12.3.4 rolled everything back to v12.3.2 to unblock users.
+
+**v12.3.5 restores all 25 fixes**, with the bearer-auth mechanism surgically removed.
+
+### Kept hardening from v12.3.3
+- 5 MB JSON body limit
+- In-memory rate limiter (300 req/min/IP)
+- Path traversal protection on `watch.context.path`
+- `RestartGuard` (time-windowed restart counter)
+- Idle session eviction on pool slot allocation
+- WAL checkpoint + `journal_size_limit`
+- Periodic `clearFailed()` for pending_messages
+- FTS5 keyword-search fallback when ChromaDB is unavailable
+- `ResponseProcessor` marks non-XML responses as failed (with retry) instead of confirming
+- `/health` reports `activeSessions`
+- Summarize hook wraps `workerHttpRequest` in try/catch (no more blocking exit code 2)
+- UserPromptSubmit session-init waits for worker health on Linux/WSL
+- MCP loopback self-check uses `process.execPath` instead of bare `node`
+- Nounset-safe `TTY_ARGS` in `docker/claude-mem/run.sh`
+
+### Removed from v12.3.3
+- `src/shared/auth-token.ts` (deleted)
+- `requireAuth` middleware and its wiring in `Server.ts`/`Middleware.ts`
+- `Authorization: Bearer` injection in `worker-utils.ts` (hook client), `ViewerRoutes.ts` (browser token injection), viewer `authFetch`, and the OpenCode plugin
+
+### Upgrade notes
+- `~/.claude-mem/worker-auth-token` from a previous 12.3.3 install is harmless and can be deleted.
+- If your Claude Code session kept the 12.3.3 daemon alive, restart Claude Code once so the fresh 12.3.5 daemon takes over.
+
+## [12.3.4] - 2026-04-20
+
+## Rollback of v12.3.3
+
+v12.3.3 (Issue Blowout 2026, PR #2080) broke SessionStart context injection — new sessions received no memory context from claude-mem. This release reverts to the v12.3.2 tree state while the regression is investigated.
+
+### Reverted
+- #2080 — Issue Blowout 2026 (25 bugs across worker, hooks, security, and search)
+
+### Notes
+No functional changes from v12.3.2. A follow-up release will re-land the v12.3.3 fixes individually once the context regression is identified and resolved.
+
+## [12.3.3] - 2026-04-20
+
+## Issue Blowout 2026 — 25 bugs across worker, hooks, security, and search
+
+### Security Hardening
+- Bearer token authentication for all worker API endpoints with auto-generated tokens
+- Path traversal protection on context write paths
+- Per-user worker port derivation (37700 + uid%100) to prevent cross-user data leakage
+- Rate limiting (300 req/min/IP) and reduced JSON body limit (50MB → 5MB)
+- Caller headers can no longer override the bearer auth token
+
+### Worker Stability
+- Time-windowed RestartGuard replaces flat counter — prevents stranding pending messages on long sessions
+- Idle session eviction prevents pool slot deadlock when all slots are full
+- MCP loopback self-check uses process.execPath instead of bare 'node'
+- Age-scoped failed message purge (1h retention) instead of clearing all
+- RestartGuard decay anchored to real successes, not object creation time
+
+### Search & Chroma
+- FTS5 keyword fallback when ChromaDB is unavailable for all search handlers
+- doc_type:'observation' filter on Chroma queries feeding observation hydration
+- Project filtering passed to Chroma queries and SQLite hydration in all endpoints
+- Bounded post-import Chroma sync with concurrency limit of 8
+- FTS5 MATCH input escaped as quoted literal phrases to prevent syntax errors
+- LIKE metacharacters escaped in prompt text search
+- date_desc ordering respected in FTS session search
+
+### Hooks Reliability
+- Summarize hook wrapped in try/catch to prevent exit code 2 on network failures
+- Session-init gated on health check success — no longer runs when worker unreachable
+- Health-check wait loop added to UserPromptSubmit for Linux/WSL startup race
+
+### Database & Performance
+- Periodic WAL checkpoint and journal_size_limit to prevent unbounded WAL growth
+- FTS5 availability cached at construction time (no DDL probe per query)
+- _fts5Available downgraded when FTS table creation fails
+
+### Viewer UI
+- response.ok check added to settings save and initial load flows
+- Auth failure handling in saveSettings
+
+## [12.3.2] - 2026-04-20
+
+## Bug Fixes
+
+- **Search**: Fix `concept`/`concepts` parameter mismatch in `/api/search/by-concept` (#1916)
+- **Search**: Add FTS5 keyword fallback when ChromaDB is unavailable (#1913, #2048)
+- **Database**: Add periodic `clearFailed()` to purge stale pending messages (#1957)
+- **Database**: Add WAL checkpoint schedule and `journal_size_limit` to prevent unbounded growth (#1956)
+- **Worker**: Mark messages as failed (with retry) instead of confirming on non-XML responses (#1874)
+- **Worker**: Include `activeSessions` in `/health` endpoint for queue liveness monitoring (#1867)
+- **Docker**: Fix nounset-safe `TTY_ARGS` expansion in `run.sh`
+- **Search**: Cache `isFts5Available()` at construction time (Greptile review)
+
+## Closed Issues
+
+#1908, #1953, #1916, #1913, #2048, #1957, #1956, #1874, #1867
+
+## [12.3.1] - 2026-04-20
+
+## Error Handling & Code Quality
+
+This patch release resolves error handling anti-patterns across the entire codebase (91 files), improving resilience and correctness.
+
+### Bug Fixes
+
+- **OpenRouterAgent**: Restored assistant replies to `conversationHistory` — multi-turn context was lost after method extraction (#2078)
+- **ChromaSync**: Fixed cross-type dedup collision where `observation#N`, `session_summary#N`, and `user_prompt#N` could silently drop results
+- **Timeline queries**: Fixed logger calls wrapping Error inside an object instead of passing directly
+- **FTS migrations**: Preserved non-Error failure details instead of silently dropping them
+
+### Error Handling Improvements
+
+- Replaced 301 error handling anti-patterns across 91 files:
+  - Narrowed overly broad try-catch blocks into focused error boundaries
+  - Replaced unsafe `error as Error` casts with `instanceof` checks
+  - Added structured error logging where catches were previously empty
+  - Extracted large try blocks into dedicated helper methods
+- **Installer resilience**: Moved filesystem operations (`mkdirSync`) inside try/catch in Cursor, Gemini CLI, Goose MCP, and OpenClaw installers to maintain numeric return-code contracts
+- **GeminiCliHooksInstaller**: Install/uninstall paths now catch `readGeminiSettings()` failures instead of throwing past the `0/1` return contract
+- **OpenClawInstaller**: Malformed `openclaw.json` now throws instead of silently returning `{}` and potentially wiping user config
+- **WindsurfHooksInstaller**: Added null-safe parsing of `hooks.json` with optional chaining
+- **McpIntegrations**: Goose YAML updater now throws when claude-mem markers exist but regex replacement fails
+- **EnvManager**: Directory setup and existing-file reads are now wrapped in structured error logging
+- **WorktreeAdoption**: `adoptedSqliteIds` mutation delayed until SQL update succeeds
+- **Import script**: Guard against malformed timestamps before `toISOString()`
+- **Runtime CLI**: Guard `response.json()` parsing with controlled error output
+
+### Documentation
+
+- Added README for Docker claude-mem harness
+
+## [12.3.0] - 2026-04-20
+
+## New features
+
+### Basic claude-mem Docker container (`docker/claude-mem/`)
+A ready-to-run container for ad-hoc claude-mem testing with zero local setup beyond Docker.
+
+- `FROM node:20`; layers pinned Bun (1.3.12) + uv (0.11.7) + the built plugin
+- Non-root `node` user so `--permission-mode bypassPermissions` works headlessly
+- `build.sh`, `run.sh` (auto-extracts OAuth from macOS Keychain or `~/.claude/.credentials.json`, falls back to `ANTHROPIC_API_KEY`), `entrypoint.sh`
+- Persistent `.claude-mem/` mount so the observations DB survives container exit
+
+Validated end-to-end: `PostToolUse` hook → queue → worker SDK call under subscription OAuth → `<observation>` XML → `observations` table → Chroma sync.
+
+### SWE-bench evaluation harness (`evals/swebench/`)
+Two-container split (our agent image + the upstream SWE-bench harness) for measuring claude-mem's effect on resolve rate.
+
+- `Dockerfile.agent` → `claude-mem/swebench-agent:latest` (same non-root, version-pinned approach)
+- `run-instance.sh` — two-turn ingest/fix protocol per instance; shallow clone at `base_commit` with full-clone fallback
+- `run-batch.py` — parallel orchestrator with OAuth extraction, per-container naming, timeout enforcement + force-cleanup, `--overwrite` guard against silent truncation of partial results
+- `eval.sh` — wraps `python -m swebench.harness.run_evaluation`
+- `summarize.py` — aggregates per-instance reports
+- `smoke-test.sh` — one-instance smoke test
+
+### Fixes / hardening (from PR review)
+- `chmod 600` on extracted OAuth creds files
+- Grouped `{ chmod || true; }` so bash precedence can't mask failed `curl|sh` installs
+- macOS creds: Keychain-first with file fallback for migrated / older setups
+- `smoke-test.sh` `TIMEOUT` now actually enforced via `timeout`/`gtimeout` plus `docker rm -f` on exit 124
+- Container naming + force-cleanup in `run-batch.py` timeout handler prevents orphan containers
+- Fixed stdin-redirection collision in the consolidated `smoke-test.sh` JSON parser
+- Drop `exec` in `run.sh` so the EXIT trap fires and cleans the temp creds file
+
+**PR:** https://github.com/thedotmack/claude-mem/pull/2076
+
+## [12.2.3] - 2026-04-19
+
+## Fixed
+
+- **Parser: stop warning on normal observation responses (#2074).** Eliminated the `PARSER Summary response contained <observation> tags instead of <summary> — prompt conditioning may need strengthening` warning that fired on every normal observation turn. The warning was inherited from #1345 when `parseSummary` was only called after summary prompts; after #1633's refactor it runs on every response, so the observation-only fallthrough always tripped. Gated the entire observation-on-summary path on `coerceFromObservation` so only genuine summary-turn coercion failures log.
+
+**Full diff:** https://github.com/thedotmack/claude-mem/compare/v12.2.2...v12.2.3
+
+## [12.2.2] - 2026-04-19
+
+## Subagent summary disable + labeling
+
+Claude Code subagents (the Task tool and built-in agents like Explore/Plan/Bash) no longer trigger a session summary on Stop, and every observation row now carries the originating subagent's identity.
+
+### Features
+
+- **Subagent Stop hooks skip summarization.** When a hook fires inside a subagent (identified by `agent_id` on stdin), the handler short-circuits before bootstrapping the worker. Only the main assistant owns the session summary. Sessions started with `--agent` (which set `agent_type` but not `agent_id`) still own their summary.
+- **Observations are labeled by subagent.** The `observations` table gains two new nullable columns — `agent_type` and `agent_id` — populated end-to-end from the hook stdin through the pending queue into storage. Main-session rows remain `NULL`. Labels survive worker restarts via matching columns on `pending_messages`.
+
+### Safety
+
+- Defense-in-depth guard on the worker `/api/sessions/summarize` route so direct API callers can't bypass the hook-layer short-circuit.
+- `pickAgentField` type guard at the adapter edge validates the hook input: must be a non-empty string ≤128 characters, otherwise dropped.
+- Content-hash dedup intentionally excludes `agent_type`/`agent_id` so the same semantic observation from a subagent and its parent merges to a single row.
+
+### Schema
+
+- Migration 010 (version 27) adds the two columns to `observations` and `pending_messages`, plus indexes on `observations.agent_type` and `observations.agent_id`. Idempotent, state-aware logging.
+
+### Tests
+
+- 17 new unit tests: adapter extraction (length cap boundary, empty-string rejection, type guards), handler short-circuit behavior, DB-level labeling and dedup invariants.
+
+PR: #2073
+
+## [12.2.1] - 2026-04-19
+
+## What's Fixed
+
+### Break infinite summary-retry loop (#1633)
+
+When the summary agent returned `<observation>` tags instead of `<summary>` tags, the parser rejected the response, no summary was stored, the session completed without a summary, and a new session was spawned with ~5–6 KB of extra prompt context — repeating indefinitely.
+
+**Three layers of defense (PR #2072):**
+
+- **Parser coercion** — when a summary is expected, observation fields are mapped to summary fields (title → request/completed, narrative → investigated, facts → learned) instead of discarding the response.
+- **Stronger prompt** — summary prompts now include an explicit tag-requirement block and a closing reminder so the LLM is much less likely to emit observation tags in the first place.
+- **Circuit breaker** — per-session counter caps consecutive summary failures at 3; further summarize requests are skipped until a success resets it. Explicit `<skip_summary/>` responses are treated as neutral, not failures.
+
+**Edge cases handled:**
+
+- Empty leading `<observation>` blocks fall through to the first populated one.
+- Empty `<summary></summary>` wrappers fall back to observation coercion.
+- Multiple observation blocks are iterated via a global regex.
+
+Full details: #2072
+
+## [12.2.0] - 2026-04-18
+
+## Highlights
+
+**Worktree Adoption** — When a git worktree is merged back into its parent branch, its observations are now consolidated into the parent project's view, so memory follows the code after a merge.
+
+## Features
+
+- **Worktree adoption engine** — consolidates merged-worktree observations under the parent project (#2052)
+- **`npx claude-mem adopt`** — new CLI command with `--dry-run` and `--branch X` flags for manual adoption
+- **Auto-adoption on worker startup** — merged worktrees are adopted automatically when the worker service starts
+- **CWD-based project remap** — project identity derived from `pending_messages.cwd`, applied on worker startup
+- **Parent + worktree read scope** — worktree sessions now include parent repo observations in their read scope
+- **Composite project names** — parent/worktree naming prevents observations from crossing worktrees
+- **Merged-into-parent badge** — UI now flags observations that have been adopted from a merged worktree
+- **Observer-sessions project hidden** — internal bookkeeping project no longer appears in UI lists
+
+## Fixes
+
+- Drop orphan flag when filtering empty-string spawn args (#2049)
+- Self-heal Chroma metadata on re-run
+- Schema guard, startup adoption path, and query parity hardening
+- Git operation timeouts + dry-run sentinel fixes
+- Context derivation uses explicit `projects` array rather than cwd
+
+## Chores
+
+- Removed auto-generated per-directory `CLAUDE.md` files across the tree
+
+**Full Changelog**: https://github.com/thedotmack/claude-mem/compare/v12.1.6...v12.2.0
+
+## [12.1.6] - 2026-04-16
+
+## Fix
+
+**Critical regression fix (#2049): observations no longer save on Claude Code 2.1.109+**
+
+Resolves 100% observation/summary failure on Claude Code 2.1.109+ caused by a latent bug in how the bundled Agent SDK emits the `--setting-sources` flag.
+
+### Root cause
+
+The Agent SDK emits `["--setting-sources", ""]` whenever `settingSources` defaults to `[]`. Our existing Bun-compat filter stripped the empty string but left an orphan `--setting-sources` flag, which then consumed the following `--permission-mode` as its value. Claude Code 2.1.109+ rejects this with:
+
+```
+Error processing --setting-sources:
+  Invalid setting source: --permission-mode.
+```
+
+Every observation SDK spawn crashed with exit code 1 before any data could be written.
+
+### Fix
+
+`ProcessRegistry.createPidCapturingSpawn` now uses a pair-aware filter: when an empty-string arg follows a `--flag`, both are dropped together. The SDK default (no setting sources) is preserved by omission.
+
+### Credits
+
+Thanks to @GigiTiti-Kai for the detailed root-cause report in #2049.
+
+## [12.1.5] - 2026-04-15
+
+Users on v12.1.3 experience 100% observation failure due to empty-string arg filtering corrupting `--setting-sources` on Claude Code 2.1.109+. The fix already landed in v12.1.4 (commit 3d92684 — `fix: filter empty string args before Bun spawn()`). This release forces the update to propagate across npm and the marketplace so every user gets the fix.
+
+## Backlog cleanup
+Also shipped earlier today: the April 2026 backlog consolidation merged 93 PRs and 147 issues into 138 clean tracking issues (95 bugs, 43 feature requests).
+
+## Upgrade
+```bash
+npm install -g claude-mem@12.1.5
+```
+
+## [12.1.4] - 2026-04-15
+
+## Bug Fixes
+
+- **Revert unauthorized $CMEM branding**: A prior Claude instance inserted `$CMEM` token branding into the context injection header during a compression refactor. Reverted back to the original descriptive format: `# [project] recent context, datetime`
+
+## [12.1.3] - 2026-04-15
+
+## What's Changed
+
+### Reverted
+- **Remove overengineered summary salvage logic** (#1850) — Reverts PR #1718 which fabricated synthetic summaries from observation data when the AI returned `<observation>` instead of `<summary>` tags. Missing a summary is preferable to creating a fake one with poorly-mapped fields.
+
+**Full Changelog**: https://github.com/thedotmack/claude-mem/compare/v12.1.2...v12.1.3
+
+## [12.1.2] - 2026-04-15
+
+## Community PRs merged (15)
+
+**Runtime & reliability**
+- #1698 Reap stuck generators in reapStaleSessions (@ousamabenyounes)
+- #1697 Circuit breaker on OpenClaw worker client (@ousamabenyounes)
+- #1696 Resolve Setup hook reference, warn on macOS-only binary (@ousamabenyounes)
+- #1693 Session lifecycle guards to prevent runaway API spend (@ousamabenyounes)
+- #1692 Resolve Gemini CLI 0.37.0 session capture failures (@ousamabenyounes)
+
+**Cross-platform & hooks**
+- #1833 Replace hardcoded nvm/homebrew PATH with login-shell resolution (@masak1yu)
+- #1781 Filter empty-string args before Bun spawn() (@biswanath-cmd)
+- #1780 Fix npx search, default Codex context to workspace-local AGENTS (@enma998)
+
+**Data integrity**
+- #1820 Use parent project name for worktree observation writes (@0xLeathery)
+- #1771 Exclude primary-key index from unique-constraint check in migration 7 (@derjochenmeyer)
+- #1770 Restrict ~/.claude-mem/.env permissions to 0600 (@derjochenmeyer)
+- #1729 Preserve targeted file reads and invalidate on mtime (@quangtran88)
+- #1776 Coerce corpus route filters (@suyua9)
+
+**Docs**
+- #1777 Document CLAUDE_MEM_MODE (@AviArora02-commits)
+- #1765 Update opencode install instructions (@s-uryansh)
+
+## Held for rebase
+- #1748, #1694, #1695 — developed conflicts during batch merge
+
+## Test baseline
+1429 pass / 11 fail (improved from 18 fail at v12.1.1)
+
+## [12.1.1] - 2026-04-15
+
+14 community PRs merged + 1 post-merge bug fix. This patch addresses the most impactful bugs across summary persistence, MCP compliance, cross-platform compatibility, and data integrity.
+
+### Highlights
+
+**Summary pipeline fix** — When the LLM returns `<observation>` tags instead of `<summary>` tags (~72% of the time on v12.0.x), data is now salvaged into a synthetic summary instead of being silently discarded. (#1718)
+
+**MCP compliance** — `list_corpora` now returns proper `CallToolResult` objects instead of bare arrays that crashed MCP clients. Search and timeline tools now declare `inputSchema.properties`. (#1701, #1555)
+
+**Data integrity** — Ghost observations with no content fields are now filtered before storage. Search queries are now scoped to the current project via `WHERE project = ?`. (#1676, #1688... wait, #1688 wasn't in this batch)
+
+### Bug Fixes
+
+- **fix(ResponseProcessor):** salvage synthetic summary when AI returns `<observation>` instead of `<summary>` (#1718)
+- **fix(ResponseProcessor):** broadcast uses `summaryForStore` to support salvaged summaries (post-merge fix for #1718)
+- **fix(hooks):** soft-fail SessionStart health check on cold start (#1725)
+- **fix(deps):** upgrade glob ^11.0.3 → ^13.0.0 for CVE fix (#1724, #1717)
+- **fix(MCP):** wrap `list_corpora` response in CallToolResult shape (#1701, #1700)
+- **fix(MCP):** declare inputSchema properties for search and timeline tools (#1555, #1384, #1413)
+- **fix(config):** use bun to run mcp-server.cjs instead of node shebang (#1658, #1648)
+- **fix(parser):** filter ghost observations with no content fields (#1676, #1625)
+- **fix(chroma):** set cwd to homedir when spawning chroma-mcp to prevent .env.local crash (#1679, #1297)
+- **fix(Windows):** avoid DEP0190 deprecation by using single-string spawnSync (#1677, #1503)
+- **fix(worker):** suppress false ERROR when duplicate daemon loses port bind race (#1680, #1447)
+- **fix(session):** expose `summaryStored` in session status for silent summary loss detection (#1686, #1633)
+- **fix(cross-platform):** add .gitattributes to enforce LF endings on plugin scripts (#1678, #1342)
+- **fix(tests):** remove leaky mock.module() that polluted parallel workers (#1666, #1299)
+
+### Docs
+
+- Add Language Support section to smart-explore/SKILL.md (#1670, #1651)
+- Remove misplaced tree-sitter docs from mem-search/SKILL.md
+
+### Contributors
+
+@ousamabenyounes (10 PRs), @aaronwong1989, @kbroughton, @joao-oliveira-softtor, @octo-patch, @ck0park
+
 ## [12.1.0] - 2026-04-09
 
 ## Knowledge Agents

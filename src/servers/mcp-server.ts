@@ -172,17 +172,18 @@ async function callWorkerAPI(
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   logger.debug('SYSTEM', '→ Worker API', undefined, { endpoint, params });
 
-  try {
-    const searchParams = new URLSearchParams();
+  const searchParams = new URLSearchParams();
 
-    // Convert params to query string
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== null) {
-        searchParams.append(key, String(value));
-      }
+  // Convert params to query string
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) {
+      searchParams.append(key, String(value));
     }
+  }
 
-    const apiPath = `${endpoint}?${searchParams}`;
+  const apiPath = `${endpoint}?${searchParams}`;
+
+  try {
     const response = await retryableRequest(apiPath);
 
     if (!response.ok) {
@@ -194,15 +195,10 @@ async function callWorkerAPI(
 
     logger.debug('SYSTEM', '← Worker API success', undefined, { endpoint });
 
-    // Wrap raw worker data in MCP format (same as callWorkerAPIPost)
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify(data, null, 2)
-      }]
-    };
-  } catch (error) {
-    logger.error('SYSTEM', '← Worker API error', { endpoint }, error as Error);
+    // Worker returns { content: [...] } format directly
+    return data as { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+  } catch (error: unknown) {
+    logger.error('SYSTEM', '← Worker API error', { endpoint }, error instanceof Error ? error : new Error(String(error)));
     return {
       content: [{
         type: 'text' as const,
@@ -211,6 +207,33 @@ async function callWorkerAPI(
       isError: true
     };
   }
+}
+
+async function executeWorkerPostRequest(
+  endpoint: string,
+  body: Record<string, any>
+): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+  const response = await retryableRequest(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Worker API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+
+  logger.debug('HTTP', 'Worker API success (POST)', undefined, { endpoint });
+
+  return {
+    content: [{
+      type: 'text' as const,
+      text: JSON.stringify(data, null, 2)
+    }]
+  };
 }
 
 /**
@@ -223,30 +246,9 @@ async function callWorkerAPIPost(
   logger.debug('HTTP', 'Worker API request (POST)', undefined, { endpoint });
 
   try {
-    const response = await retryableRequest(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Worker API error (${response.status}): ${errorText}`);
-    }
-
-    const data = await response.json();
-
-    logger.debug('HTTP', 'Worker API success (POST)', undefined, { endpoint });
-
-    // Wrap raw data in MCP format
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify(data, null, 2)
-      }]
-    };
-  } catch (error) {
-    logger.error('HTTP', 'Worker API error (POST)', { endpoint }, error as Error);
+    return await executeWorkerPostRequest(endpoint, body);
+  } catch (error: unknown) {
+    logger.error('HTTP', 'Worker API error (POST)', { endpoint }, error instanceof Error ? error : new Error(String(error)));
     return {
       content: [{
         type: 'text' as const,
@@ -264,9 +266,9 @@ async function verifyWorkerConnection(): Promise<boolean> {
   try {
     const response = await workerHttpRequest('/api/health');
     return response.ok;
-  } catch (error) {
+  } catch (error: unknown) {
     // Expected during worker startup or if worker is down
-    logger.debug('SYSTEM', 'Worker health check failed', {}, error as Error);
+    logger.debug('SYSTEM', 'Worker health check failed', {}, error instanceof Error ? error : new Error(String(error)));
     return false;
   }
 }
@@ -298,12 +300,12 @@ async function ensureWorkerConnection(): Promise<boolean> {
       );
     }
     return started;
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error(
       'SYSTEM',
       'Worker auto-start threw — MCP tools that require the worker (search, timeline, get_observations) will fail until the worker is running.',
       undefined,
-      error as Error
+      error instanceof Error ? error : new Error(String(error))
     );
     return false;
   }
@@ -353,7 +355,17 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     description: 'Step 1: Search memory. Returns index with IDs. Params: query, limit, project, type, obs_type, dateStart, dateEnd, offset, orderBy',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Max results (default 20)' },
+        project: { type: 'string', description: 'Filter by project name' },
+        type: { type: 'string', description: 'Filter by observation type' },
+        obs_type: { type: 'string', description: 'Filter by obs_type field' },
+        dateStart: { type: 'string', description: 'Start date filter (ISO)' },
+        dateEnd: { type: 'string', description: 'End date filter (ISO)' },
+        offset: { type: 'number', description: 'Pagination offset' },
+        orderBy: { type: 'string', description: 'Sort order: date_desc or date_asc' }
+      },
       additionalProperties: true
     },
     handler: async (args: any) => {
@@ -366,7 +378,13 @@ NEVER fetch full details without filtering first. 10x token savings.`,
     description: 'Step 2: Get context around results. Params: anchor (observation ID) OR query (finds anchor automatically), depth_before, depth_after, project',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        anchor: { type: 'number', description: 'Observation ID to center the timeline around' },
+        query: { type: 'string', description: 'Query to find anchor automatically' },
+        depth_before: { type: 'number', description: 'Items before anchor (default 3)' },
+        depth_after: { type: 'number', description: 'Items after anchor (default 3)' },
+        project: { type: 'string', description: 'Filter by project name' }
+      },
       additionalProperties: true
     },
     handler: async (args: any) => {
@@ -716,8 +734,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     return await tool.handler(request.params.arguments || {});
-  } catch (error) {
-    logger.error('SYSTEM', 'Tool execution failed', { tool: request.params.name }, error as Error);
+  } catch (error: unknown) {
+    logger.error('SYSTEM', 'Tool execution failed', { tool: request.params.name }, error instanceof Error ? error : new Error(String(error)));
     return {
       content: [{
         type: 'text' as const,
