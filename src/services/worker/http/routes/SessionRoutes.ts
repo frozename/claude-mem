@@ -762,8 +762,14 @@ export class SessionRoutes extends BaseRouteHandler {
 
     const store = this.dbManager.getSessionStore();
 
-    // Get or create session
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource);
+    // Read-only lookup — a session that was never initialized can't be
+    // summarized. Don't create a garbage empty-project row just to discover
+    // there's nothing to summarize.
+    const sessionDbId = store.findSessionIdByContentSessionId(contentSessionId);
+    if (sessionDbId === null) {
+      res.json({ status: 'skipped', reason: 'not_initialized' });
+      return;
+    }
     const promptNumber = store.getPromptNumberFromUserPrompts(contentSessionId);
 
     // Privacy check: skip if user prompt was entirely private
@@ -805,7 +811,12 @@ export class SessionRoutes extends BaseRouteHandler {
     }
 
     const store = this.dbManager.getSessionStore();
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '');
+    // Read-only lookup — don't materialize a session row just for a status poll.
+    const sessionDbId = store.findSessionIdByContentSessionId(contentSessionId);
+    if (sessionDbId === null) {
+      res.json({ status: 'not_found', queueLength: 0 });
+      return;
+    }
     const session = this.sessionManager.getSession(sessionDbId);
 
     if (!session) {
@@ -849,9 +860,18 @@ export class SessionRoutes extends BaseRouteHandler {
 
     const store = this.dbManager.getSessionStore();
 
-    // Look up sessionDbId from contentSessionId (createSDKSession is idempotent)
-    // Pass empty strings - we only need the ID lookup, not to create a new session
-    const sessionDbId = store.createSDKSession(contentSessionId, '', '', undefined, platformSource);
+    // Read-only lookup — a session that was never initialized has nothing to
+    // complete. Creating a row here with project='' leaves garbage shells in
+    // sdk_sessions (seen in practice when Claude Code opens/closes without a
+    // prompt).
+    const sessionDbId = store.findSessionIdByContentSessionId(contentSessionId);
+    if (sessionDbId === null) {
+      logger.debug('SESSION', 'session-complete: No session found for contentSessionId; nothing to complete', {
+        contentSessionId
+      });
+      res.json({ status: 'not_found', sessionDbId: null });
+      return;
+    }
 
     // Check if session is in the active sessions map
     const activeSession = this.sessionManager.getSession(sessionDbId);

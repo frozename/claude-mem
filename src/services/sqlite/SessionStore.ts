@@ -1672,6 +1672,20 @@ export class SessionStore {
    * Pure get-or-create: never modifies memory_session_id.
    * Multi-terminal isolation is handled by ON UPDATE CASCADE at the schema level.
    */
+  /**
+   * Read-only lookup: return the sdk_sessions.id for a given contentSessionId,
+   * or null if none exists. Use this from handlers that only need to *find* an
+   * existing session (completion, status poll, summarize) — calling
+   * createSDKSession with empty project/prompt as a lookup will instead insert
+   * a garbage row with project=''.
+   */
+  findSessionIdByContentSessionId(contentSessionId: string): number | null {
+    const row = this.db.prepare(
+      'SELECT id FROM sdk_sessions WHERE content_session_id = ? LIMIT 1'
+    ).get(contentSessionId) as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
   createSDKSession(
     contentSessionId: string,
     project: string,
