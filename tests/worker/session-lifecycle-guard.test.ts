@@ -167,6 +167,52 @@ describe('Wall-clock age limit (Issue #1590)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Wall-clock age limit — configurable via CLAUDE_MEM_MAX_SESSION_WALL_CLOCK_HOURS
+// ---------------------------------------------------------------------------
+
+describe('Wall-clock age limit — configurable (frozename fork)', () => {
+  it('default setting value is "0" (disabled) — long sessions no longer abort silently', async () => {
+    const { SettingsDefaultsManager } = await import('../../src/shared/SettingsDefaultsManager.js');
+    const defaults = SettingsDefaultsManager.getAllDefaults();
+    expect(defaults.CLAUDE_MEM_MAX_SESSION_WALL_CLOCK_HOURS).toBe('0');
+  });
+
+  it('parseMaxSessionWallClockMs returns 0 for disabled/invalid values', async () => {
+    const { SessionRoutes } = await import('../../src/services/worker/http/routes/SessionRoutes.js');
+    expect(SessionRoutes.parseMaxSessionWallClockMs('0')).toBe(0);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('')).toBe(0);
+    expect(SessionRoutes.parseMaxSessionWallClockMs(undefined)).toBe(0);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('garbage')).toBe(0);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('-5')).toBe(0);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('NaN')).toBe(0);
+  });
+
+  it('parseMaxSessionWallClockMs converts positive hours to milliseconds', async () => {
+    const { SessionRoutes } = await import('../../src/services/worker/http/routes/SessionRoutes.js');
+    expect(SessionRoutes.parseMaxSessionWallClockMs('1')).toBe(60 * 60 * 1000);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('4')).toBe(4 * 60 * 60 * 1000);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('48')).toBe(48 * 60 * 60 * 1000);
+    expect(SessionRoutes.parseMaxSessionWallClockMs('0.5')).toBe(0.5 * 60 * 60 * 1000);
+  });
+
+  it('regression: the 62h session scenario would NOT be aborted with default (0)', async () => {
+    const { SessionRoutes } = await import('../../src/services/worker/http/routes/SessionRoutes.js');
+    const ageMs = 62 * 60 * 60 * 1000; // matches the llamactl session that silently stopped capturing
+    const limitMs = SessionRoutes.parseMaxSessionWallClockMs('0');
+    // Guard is disabled → no abort regardless of age
+    expect(limitMs).toBe(0);
+    expect(ageMs > limitMs && limitMs > 0).toBe(false);
+  });
+
+  it('regression: the 62h session WOULD be aborted when user opts into 48h cap', async () => {
+    const { SessionRoutes } = await import('../../src/services/worker/http/routes/SessionRoutes.js');
+    const ageMs = 62 * 60 * 60 * 1000;
+    const limitMs = SessionRoutes.parseMaxSessionWallClockMs('48');
+    expect(ageMs > limitMs && limitMs > 0).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Duplicate process prevention in createPidCapturingSpawn
 // ---------------------------------------------------------------------------
 

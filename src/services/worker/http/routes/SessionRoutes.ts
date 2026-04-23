@@ -98,35 +98,57 @@ export class SessionRoutes extends BaseRouteHandler {
    * The next generator will use the new provider with shared conversationHistory.
    */
   private static readonly STALE_GENERATOR_THRESHOLD_MS = 30_000; // 30 seconds (#1099)
-  private static readonly MAX_SESSION_WALL_CLOCK_MS = 4 * 60 * 60 * 1000; // 4 hours (#1590)
+
+  /**
+   * Parse the raw CLAUDE_MEM_MAX_SESSION_WALL_CLOCK_HOURS setting into a millisecond
+   * limit. Returns 0 (disabled) for non-numeric values, negatives, or explicit 0.
+   * Exported as static for unit testing.
+   */
+  static parseMaxSessionWallClockMs(raw: string | undefined): number {
+    const hours = Number(raw);
+    if (!Number.isFinite(hours) || hours <= 0) return 0;
+    return hours * 60 * 60 * 1000;
+  }
+
+  /**
+   * Read the wall-clock session-age limit from settings.
+   * Returns 0 when disabled (the default — user opts in to bound runaway spend).
+   */
+  private getMaxSessionWallClockMs(): number {
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    return SessionRoutes.parseMaxSessionWallClockMs(settings.CLAUDE_MEM_MAX_SESSION_WALL_CLOCK_HOURS);
+  }
 
   private ensureGeneratorRunning(sessionDbId: number, source: string): void {
     const session = this.sessionManager.getSession(sessionDbId);
     if (!session) return;
 
-    // Wall-clock age guard: refuse to start new generators for sessions that have
-    // been alive too long to prevent runaway API costs (Issue #1590).
+    // Wall-clock age guard (opt-in via CLAUDE_MEM_MAX_SESSION_WALL_CLOCK_HOURS): refuse
+    // to start new generators for sessions alive past the configured limit (Issue #1590).
     // Use the persisted started_at_epoch from the DB so the guard survives worker
     // restarts (session.startTime is reset to Date.now() on every re-activation).
-    const dbSessionRecord = this.dbManager.getSessionStore().db
-      .prepare('SELECT started_at_epoch FROM sdk_sessions WHERE id = ? LIMIT 1')
-      .get(sessionDbId) as { started_at_epoch: number } | undefined;
-    const sessionOriginMs = dbSessionRecord?.started_at_epoch ?? session.startTime;
-    const sessionAgeMs = Date.now() - sessionOriginMs;
-    if (sessionAgeMs > SessionRoutes.MAX_SESSION_WALL_CLOCK_MS) {
-      logger.warn('SESSION', 'Session exceeded wall-clock age limit — aborting to prevent runaway spend', {
-        sessionId: sessionDbId,
-        ageHours: Math.round(sessionAgeMs / 3_600_000 * 10) / 10,
-        limitHours: SessionRoutes.MAX_SESSION_WALL_CLOCK_MS / 3_600_000,
-        source
-      });
-      if (!session.abortController.signal.aborted) {
-        session.abortController.abort();
+    const maxWallClockMs = this.getMaxSessionWallClockMs();
+    if (maxWallClockMs > 0) {
+      const dbSessionRecord = this.dbManager.getSessionStore().db
+        .prepare('SELECT started_at_epoch FROM sdk_sessions WHERE id = ? LIMIT 1')
+        .get(sessionDbId) as { started_at_epoch: number } | undefined;
+      const sessionOriginMs = dbSessionRecord?.started_at_epoch ?? session.startTime;
+      const sessionAgeMs = Date.now() - sessionOriginMs;
+      if (sessionAgeMs > maxWallClockMs) {
+        logger.warn('SESSION', 'Session exceeded wall-clock age limit — aborting to prevent runaway spend', {
+          sessionId: sessionDbId,
+          ageHours: Math.round(sessionAgeMs / 3_600_000 * 10) / 10,
+          limitHours: maxWallClockMs / 3_600_000,
+          source
+        });
+        if (!session.abortController.signal.aborted) {
+          session.abortController.abort();
+        }
+        const pendingStore = this.sessionManager.getPendingMessageStore();
+        pendingStore.markAllSessionMessagesAbandoned(sessionDbId);
+        this.sessionManager.removeSessionImmediate(sessionDbId);
+        return;
       }
-      const pendingStore = this.sessionManager.getPendingMessageStore();
-      pendingStore.markAllSessionMessagesAbandoned(sessionDbId);
-      this.sessionManager.removeSessionImmediate(sessionDbId);
-      return;
     }
 
     // GUARD: Prevent duplicate spawns
