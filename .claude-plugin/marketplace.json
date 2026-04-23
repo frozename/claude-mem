@@ -1,11 +1,11 @@
 {
-  "name": "thedotmack",
+  "name": "frozename",
   "owner": {
-    "name": "Alex Newman"
+    "name": "frozename"
   },
   "metadata": {
-    "description": "Plugins by Alex Newman (thedotmack)",
-    "homepage": "https://github.com/thedotmack/claude-mem"
+    "description": "frozename fork of claude-mem",
+    "homepage": "https://github.com/frozename/claude-mem"
   },
   "plugins": [
     {

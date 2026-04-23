@@ -20,8 +20,8 @@ const IS_WINDOWS = process.platform === 'win32';
  * 1. CLAUDE_PLUGIN_ROOT env var (set by Claude Code for hooks — works for
  *    both cache-based and marketplace installs)
  * 2. Script location (dirname of this file, up one level from scripts/)
- * 3. XDG path (~/.config/claude/plugins/marketplaces/thedotmack)
- * 4. Legacy path (~/.claude/plugins/marketplaces/thedotmack)
+ * 3. XDG path (~/.config/claude/plugins/marketplaces/frozename)
+ * 4. Legacy path (~/.claude/plugins/marketplaces/frozename)
  */
 function resolveRoot() {
   // CLAUDE_PLUGIN_ROOT is the authoritative location set by Claude Code
@@ -40,7 +40,7 @@ function resolveRoot() {
   }
 
   // Probe XDG path, then legacy
-  const marketplaceRel = join('plugins', 'marketplaces', 'thedotmack');
+  const marketplaceRel = join('plugins', 'marketplaces', 'frozename');
   const xdg = join(homedir(), '.config', 'claude', marketplaceRel);
   if (existsSync(join(xdg, 'package.json'))) return xdg;
 

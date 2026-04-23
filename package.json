@@ -19,11 +19,11 @@
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/thedotmack/claude-mem.git"
+    "url": "https://github.com/frozename/claude-mem.git"
   },
-  "homepage": "https://github.com/thedotmack/claude-mem#readme",
+  "homepage": "https://github.com/frozename/claude-mem#readme",
   "bugs": {
-    "url": "https://github.com/thedotmack/claude-mem/issues"
+    "url": "https://github.com/frozename/claude-mem/issues"
   },
   "type": "module",
   "bin": {
@@ -64,7 +64,7 @@
   "scripts": {
     "dev": "npm run build-and-sync",
     "build": "node scripts/sync-plugin-manifests.js && node scripts/build-hooks.js",
-    "build-and-sync": "npm run build && npm run sync-marketplace && sleep 1 && cd ~/.claude/plugins/marketplaces/thedotmack && npm run worker:restart",
+    "build-and-sync": "npm run build && npm run sync-marketplace && sleep 1 && cd ~/.claude/plugins/marketplaces/frozename && npm run worker:restart",
     "sync-marketplace": "node scripts/sync-marketplace.cjs",
     "sync-marketplace:force": "node scripts/sync-marketplace.cjs --force",
     "build:binaries": "node scripts/build-worker-binary.js",

@@ -1,6 +1,6 @@
 {
   "name": "claude-mem",
-  "version": "12.1.0",
+  "version": "12.3.9",
   "description": "Persistent memory system — preserve context across Gemini CLI sessions",
   "contextFileName": "GEMINI.md"
 }
